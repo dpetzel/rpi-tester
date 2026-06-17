@@ -209,10 +209,10 @@ run_storage_test() {
 check_usb() {
     USB_LIST=$(lsusb 2>/dev/null || echo "none")
     USB_TREE=$(lsusb -t 2>/dev/null || echo "")
-    USB_CONTROLLERS=$(echo "$USB_LIST" | grep -ci "hub" || echo "0")
+    USB_CONTROLLERS=$(echo "$USB_LIST" | grep -ci "hub") || true
 
     # Count external devices (anything that isn't a root hub or internal hub)
-    USB_DEVICES=$(echo "$USB_LIST" | grep -v "root hub" | grep -cv "Hub" || echo "0")
+    USB_DEVICES=$(echo "$USB_LIST" | grep -v "root hub" | grep -cv "Hub") || true
 
     # Per-model port validation
     USB_PORT_ERRORS=""
@@ -225,14 +225,16 @@ check_usb() {
     elif echo "$MODEL" | grep -qi "Pi 3"; then
         # Pi 3B/3B+: LAN9514/LAN7515 is internal USB hub + Ethernet combo
         # Topology: root_hub -> LAN9514 hub (0424:9514) -> Ethernet (0424:ec00) + 4 external USB ports
-        LAN_HUB=$(echo "$USB_LIST" | grep -c "0424:9514\|0424:7800" || echo "0")
-        LAN_ETH=$(echo "$USB_LIST" | grep -c "0424:ec00\|0424:7800" || echo "0")
-        # Count physical ports in use on the LAN hub (direct children, excluding internal Ethernet on Port 001)
-        # The LAN9514 is a 5-port hub: port 1 = internal ethernet, ports 2-5 = external USB
-        USB_PORTS_USED=$(echo "$USB_TREE" | grep -A1 "Driver=hub/5p" | grep -v "Driver=hub/5p" | head -1 > /dev/null; \
-            echo "$USB_TREE" | awk '/Driver=hub\/5p/{found=1; next} found && /^\s+\|__ Port/{if(!/smsc95xx|lan78xx/) count++} found && !/^\s+\|__ Port|^\s+\|.*\|__ Port/{exit} END{print count+0}')
-        # Simpler approach: count lines that are direct children (8 spaces indent) of the LAN hub, excluding ethernet
-        USB_PORTS_USED=$(echo "$USB_TREE" | sed -n '/Driver=hub\/5p/,/^[^ ]/p' | grep "^        |__ Port" | grep -cv "smsc95xx\|lan78xx" 2>/dev/null || echo "0")
+        LAN_HUB=$(echo "$USB_LIST" | grep -c "0424:9514\|0424:7800") || true
+        LAN_ETH=$(echo "$USB_LIST" | grep -c "0424:ec00\|0424:7800") || true
+        # Count occupied physical USB ports from tree topology
+        # Pi 3B/3B+: 4 physical ports split across hub/4p (top) and hub/3p (LAN sub-hub)
+        # Top-level ports: direct children (8-space) of hub/4p, excluding the internal LAN sub-hub
+        local _p1 _p2
+        _p1=$(echo "$USB_TREE" | grep "^        |__ Port" | grep -cv "Driver=hub/3p") || true
+        # LAN sub-hub ports: 12-space children between hub/3p and next 8-space entry, excluding ethernet
+        _p2=$(echo "$USB_TREE" | sed -n "/Driver=hub\/3p/,/^        |__ Port/p" | grep "^            |__ Port" | grep -cv "lan78xx\|smsc95xx") || true
+        USB_PORTS_USED=$((_p1 + _p2))
         USB_PORT_DETAIL="LAN hub: ${LAN_HUB}, Eth: ${LAN_ETH}, Ports used: ${USB_PORTS_USED}/4"
         if [[ "$LAN_HUB" -eq 0 ]]; then
             USB_PORT_ERRORS="LAN9514 hub missing — USB/Ethernet chip may be dead"
@@ -291,7 +293,7 @@ check_network() {
 
     # Bluetooth
     if command -v bluetoothctl &>/dev/null; then
-        BT_PRESENT=$(bluetoothctl show 2>/dev/null | grep -c "Controller" || echo "0")
+        BT_PRESENT=$(bluetoothctl show 2>/dev/null | grep -c "Controller") || true
         if [[ "$BT_PRESENT" -gt 0 ]]; then
             # Quick scan
             timeout 5 bluetoothctl scan on &>/dev/null &
@@ -311,10 +313,10 @@ check_network() {
 check_display() {
     if command -v kmsprint &>/dev/null; then
         HDMI_STATUS=$(kmsprint 2>/dev/null | head -5 || echo "unavailable")
-        HDMI_CONNECTED=$(echo "$HDMI_STATUS" | grep -ci "connected" || echo "0")
+        HDMI_CONNECTED=$(echo "$HDMI_STATUS" | grep -ci "connected") || true
     elif command -v tvservice &>/dev/null; then
         HDMI_STATUS=$(tvservice -s 2>/dev/null || echo "unavailable")
-        HDMI_CONNECTED=$(echo "$HDMI_STATUS" | grep -ci "HDMI" || echo "0")
+        HDMI_CONNECTED=$(echo "$HDMI_STATUS" | grep -ci "HDMI") || true
     else
         HDMI_STATUS="no display tool available"; HDMI_CONNECTED=0
     fi
@@ -697,15 +699,15 @@ print_summary() {
         local usb_pi3_status="$pass"
         local usb_pi3_txt=""
         if [[ "${LAN_HUB:-0}" -eq 0 ]]; then
-            usb_pi3_status="$fail"; usb_pi3_txt="LAN9514 hub NOT detected — chip may be dead"
+            usb_pi3_status="$fail"; usb_pi3_txt="Internal USB hub NOT detected — chip may be dead"
         elif [[ "${LAN_ETH:-0}" -eq 0 ]]; then
             usb_pi3_status="$warn"; usb_pi3_txt="Hub OK but Ethernet adapter missing"
         elif [[ "${USB_PORTS_USED:-0}" -gt 0 ]]; then
-            usb_pi3_txt="LAN9514 OK, ${USB_PORTS_USED}/4 ports in use"
+            usb_pi3_txt="${USB_PORTS_USED}/4 ports in use"
         else
-            usb_pi3_txt="LAN9514 OK, no external devices connected"
+            usb_pi3_txt="No external devices connected"
         fi
-        echo -e "║  USB (LAN9514)   │ $usb_pi3_status │ ${usb_pi3_txt}"
+        echo -e "║  USB             │ $usb_pi3_status │ ${usb_pi3_txt}"
     elif [[ "$USB_PORT_ERRORS" == "UNSUPPORTED_MODEL" ]]; then
         echo -e "║  USB             │ $warn │ Model needs USB validation support"
     else
@@ -746,16 +748,22 @@ print_summary() {
     echo -e "║  Bluetooth       │ $bt_status │ ${bt_txt}"
     if [[ $HDMI_CONNECTED -gt 0 ]]; then
         local res=$(echo "$HDMI_STATUS" | grep -oP '\d+x\d+@[0-9.]+' | head -1 || echo "connected")
-        echo -e "║  HDMI            │ $pass │ Connected, ${res}"
+        local hdmi_detail="Connected, ${res}"
+        local hdmi_status="$pass"
+        for ((i=0; i<${#HDMI_VISUAL[@]}; i++)); do
+            if [[ "${HDMI_VISUAL[$i]}" == "FAIL" ]]; then
+                hdmi_status="$fail"; hdmi_detail="${hdmi_detail}, visual FAIL"
+                overall="${RED}FAIL${NC}"; ((issues++)) || true
+            fi
+        done
+        echo -e "║  HDMI            │ $hdmi_status │ ${hdmi_detail}"
+    else
+        for ((i=0; i<${#HDMI_VISUAL[@]}; i++)); do
+            local hdmi_v_status="$pass"
+            [[ "${HDMI_VISUAL[$i]}" == "FAIL" ]] && { hdmi_v_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true; }
+            echo -e "║  HDMI            │ $hdmi_v_status │ Visual confirmed"
+        done
     fi
-    # Manual test: HDMI visual confirmation
-    for ((i=0; i<${#HDMI_VISUAL[@]}; i++)); do
-        local port_label="HDMI"
-        [[ $EXPECTED_HDMI -gt 1 ]] && port_label="HDMI $((i+1))"
-        local hdmi_v_status="$pass"
-        [[ "${HDMI_VISUAL[$i]}" == "FAIL" ]] && { hdmi_v_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true; }
-        echo -e "║  ${port_label}$(printf '%*s' $((16-${#port_label})) '')│ $hdmi_v_status │ Visual confirmed"
-    done
     # Manual test: Audio jack
     if [[ $HAS_AUDIO_JACK -eq 1 ]]; then
         local audio_status="$pass"
