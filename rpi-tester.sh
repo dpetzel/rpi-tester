@@ -216,7 +216,14 @@ check_usb() {
 
     # Per-model port validation
     USB_PORT_ERRORS=""
-    if echo "$MODEL" | grep -qi "Pi 4\|Pi 400"; then
+    if echo "$MODEL" | grep -qi "Pi 5"; then
+        # Pi 5: RP1 southbridge exposes 2 xHCI controllers (4 buses total)
+        # Bus 001(480M)/002(5000M) = USB3 port pair, Bus 003(480M)/004(5000M) = USB2 port pair
+        USB3_PAIR=$(echo "$USB_TREE" | awk '/Bus 00[12]/{f=1;next} /^\/:/{f=0} f && /^    \|__ Port/{c++} END{print c+0}')
+        USB2_PAIR=$(echo "$USB_TREE" | awk '/Bus 00[34]/{f=1;next} /^\/:/{f=0} f && /^    \|__ Port/{c++} END{print c+0}')
+        USB_PORT_DETAIL="USB3 ports: ${USB3_PAIR}/2, USB2 ports: ${USB2_PAIR}/2"
+        [[ $USB3_PAIR -eq 0 || $USB2_PAIR -eq 0 ]] && USB_PORT_ERRORS="incomplete" || true
+    elif echo "$MODEL" | grep -qi "Pi 4\|Pi 400"; then
         # Pi 4: expect 2 devices on USB2 (Bus 1 hub), 2 devices on USB3 (Bus 2)
         USB2_DEVS=$(echo "$USB_TREE" | grep -A20 "480M" | grep -c "Class=Human Interface\|Class=Mass Storage\|Class=Vendor" 2>/dev/null) || USB2_DEVS=0
         USB3_DEVS=$(echo "$USB_TREE" | grep -A20 "5000M" | grep -v "root_hub" | grep -c "Class=" 2>/dev/null) || USB3_DEVS=0
@@ -682,7 +689,18 @@ print_summary() {
     echo -e "║  Memory          │ $mem_status │ ${ram_gb}"
     echo -e "║  Boot Media      │ $stor_status │ ${BOOT_MEDIA} (${BOOT_DEVICE})"
     # USB - split into USB2 and USB3 lines
-    if echo "$MODEL" | grep -qi "Pi 4\|Pi 400"; then
+    if echo "$MODEL" | grep -qi "Pi 5"; then
+        local usb3_status="$pass" usb2_status="$pass"
+        local usb3_txt="Devices detected" usb2_txt="Devices detected"
+        if [[ ${USB3_PAIR:-0} -eq 0 ]]; then
+            usb3_status="$warn"; usb3_txt="No devices on USB3 ports"
+        fi
+        if [[ ${USB2_PAIR:-0} -eq 0 ]]; then
+            usb2_status="$warn"; usb2_txt="No devices on USB2 ports"
+        fi
+        echo -e "║  USB 3.0         │ $usb3_status │ ${usb3_txt}"
+        echo -e "║  USB 2.0         │ $usb2_status │ ${usb2_txt}"
+    elif echo "$MODEL" | grep -qi "Pi 4\|Pi 400"; then
         local usb2_status="$pass" usb3_status="$pass"
         local usb2_txt="Devices detected in all ports"
         local usb3_txt="Devices detected in all ports"
