@@ -21,11 +21,13 @@ OUTPUT="$HOME/rpi-test-results.json"
 STRESS_DURATION=60
 MEMTEST_MB=""  # auto-calculated
 QUICK=0
+NO_MANUAL=0
 
 # Parse args
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --quick|-q) QUICK=1; shift ;;
+        --no-manual) NO_MANUAL=1; shift ;;
         *) shift ;;
     esac
 done
@@ -298,20 +300,71 @@ check_network() {
         WIFI_UP="absent"; WIFI_SCAN_COUNT=0; WIFI_BAND=""; WIFI_SPEED=""
     fi
 
-    # Bluetooth
-    if command -v bluetoothctl &>/dev/null; then
-        BT_PRESENT=$(bluetoothctl show 2>/dev/null | grep -c "Controller") || true
-        if [[ "$BT_PRESENT" -gt 0 ]]; then
-            # Quick scan
-            timeout 5 bluetoothctl scan on &>/dev/null &
-            sleep 5
-            BT_DEVICES=$(bluetoothctl devices 2>/dev/null | wc -l || echo "0")
-            bluetoothctl scan off &>/dev/null || true
-        else
-            BT_DEVICES=0
+    # Bluetooth — HCI-level checks
+    BT_PRESENT=0; BT_POWERED=0; BT_ADDRESS=""; BT_NAME=""; BT_VERSION=""
+    BT_DISCOVERABLE=0; BT_SCAN_OK=0; BT_DEVICES=0; BT_HCI_IFACE=""
+
+    # Try hciconfig first (lower-level, more reliable for hardware detection)
+    if command -v hciconfig &>/dev/null; then
+        BT_HCI_IFACE=$(hciconfig 2>/dev/null | grep -oP '^hci[0-9]+' | head -1 || echo "")
+        if [[ -n "$BT_HCI_IFACE" ]]; then
+            BT_PRESENT=1
+            local hci_info=$(hciconfig "$BT_HCI_IFACE" 2>/dev/null || echo "")
+            # Check if adapter is UP and RUNNING
+            if echo "$hci_info" | grep -q "UP RUNNING"; then
+                BT_POWERED=1
+            else
+                # Try to bring it up
+                hciconfig "$BT_HCI_IFACE" up 2>/dev/null || true
+                sleep 1
+                hci_info=$(hciconfig "$BT_HCI_IFACE" 2>/dev/null || echo "")
+                echo "$hci_info" | grep -q "UP RUNNING" && BT_POWERED=1
+            fi
+            BT_ADDRESS=$(echo "$hci_info" | grep -oP 'BD Address: \K[0-9A-F:]+' || echo "")
         fi
-    else
-        BT_PRESENT=0; BT_DEVICES=0
+    fi
+
+    # Use hcitool for version/feature info if available
+    if [[ $BT_PRESENT -eq 1 ]] && command -v hcitool &>/dev/null; then
+        BT_VERSION=$(hcitool -i "${BT_HCI_IFACE}" info 2>/dev/null | grep -oP 'LMP Version: \K.*' || echo "")
+        # If hcitool info fails (no connected device), get version from hciconfig features
+        if [[ -z "$BT_VERSION" ]]; then
+            BT_VERSION=$(hciconfig "$BT_HCI_IFACE" version 2>/dev/null | grep -oP 'HCI Version: \K.*' || echo "")
+        fi
+    fi
+
+    # Fall back to bluetoothctl if hciconfig wasn't available
+    if [[ $BT_PRESENT -eq 0 ]] && command -v bluetoothctl &>/dev/null; then
+        local bt_show=$(bluetoothctl show 2>/dev/null || echo "")
+        if echo "$bt_show" | grep -q "Controller"; then
+            BT_PRESENT=1
+            BT_ADDRESS=$(echo "$bt_show" | grep -oP 'Controller \K[0-9A-F:]+' || echo "")
+            BT_NAME=$(echo "$bt_show" | grep -oP 'Name: \K.*' || echo "")
+            echo "$bt_show" | grep -q "Powered: yes" && BT_POWERED=1
+            echo "$bt_show" | grep -q "Discoverable: yes" && BT_DISCOVERABLE=1
+        fi
+    elif [[ $BT_PRESENT -eq 1 ]] && command -v bluetoothctl &>/dev/null; then
+        # Supplement hciconfig data with bluetoothctl info
+        local bt_show=$(bluetoothctl show 2>/dev/null || echo "")
+        BT_NAME=$(echo "$bt_show" | grep -oP 'Name: \K.*' || echo "")
+        echo "$bt_show" | grep -q "Discoverable: yes" && BT_DISCOVERABLE=1
+    fi
+
+    # Attempt a quick scan to verify RF works (only if powered on)
+    if [[ $BT_POWERED -eq 1 ]] && command -v bluetoothctl &>/dev/null; then
+        timeout 5 bluetoothctl --timeout 5 scan on &>/dev/null &
+        local bt_scan_pid=$!
+        sleep 5
+        wait "$bt_scan_pid" 2>/dev/null || true
+        BT_DEVICES=$(bluetoothctl devices 2>/dev/null | wc -l || echo "0")
+        bluetoothctl scan off &>/dev/null 2>&1 || true
+        # If we found any devices, scan is working
+        [[ "$BT_DEVICES" -gt 0 ]] && BT_SCAN_OK=1
+    elif [[ $BT_POWERED -eq 1 ]] && command -v hcitool &>/dev/null; then
+        # Fall back to hcitool scan
+        local scan_out=$(timeout 6 hcitool -i "$BT_HCI_IFACE" scan --length=4 2>/dev/null || echo "")
+        BT_DEVICES=$(echo "$scan_out" | grep -c "[0-9A-F][0-9A-F]:[0-9A-F][0-9A-F]:" || echo "0")
+        [[ "$BT_DEVICES" -gt 0 ]] && BT_SCAN_OK=1
     fi
 }
 
@@ -482,6 +535,13 @@ build_json() {
     },
     "bluetooth": {
       "present": $BT_PRESENT,
+      "powered": $BT_POWERED,
+      "address": $(json_escape "${BT_ADDRESS:-}"),
+      "name": $(json_escape "${BT_NAME:-}"),
+      "version": $(json_escape "${BT_VERSION:-}"),
+      "hci_interface": $(json_escape "${BT_HCI_IFACE:-}"),
+      "discoverable": $BT_DISCOVERABLE,
+      "scan_ok": $BT_SCAN_OK,
       "devices_found": $BT_DEVICES,
       "expected": $HAS_BT
     }
@@ -525,7 +585,14 @@ check_display
 check_camera
 
 # Manual tests first (so user can walk away during automated tests)
-run_manual_tests
+if [[ $NO_MANUAL -eq 0 ]]; then
+    run_manual_tests
+else
+    echo "--- Skipping Manual Tests (--no-manual) ---" >&2
+    HDMI_VISUAL=("SKIP")
+    AUDIO_JACK_RESULT="SKIP"
+    CAMERA_RESULT="SKIP"
+fi
 
 # Automated checks (seconds each)
 echo "--- Power & Thermal ---" >&2
@@ -622,6 +689,9 @@ print_summary() {
 
     # Network
     if [[ $HAS_WIFI -eq 1 && -z "$WIFI_IFACE" ]]; then
+        net_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
+    fi
+    if [[ $HAS_BT -eq 1 && "${BT_PRESENT:-0}" -eq 0 ]]; then
         net_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
     fi
 
@@ -741,10 +811,16 @@ print_summary() {
         fi
     fi
     if [[ $HAS_BT -eq 1 ]]; then
-        if [[ "${BT_PRESENT:-0}" -gt 0 ]]; then
-            bt_txt="OK"
+        if [[ "${BT_PRESENT:-0}" -gt 0 && "$BT_POWERED" -eq 1 ]]; then
+            if [[ "$BT_SCAN_OK" -eq 1 ]]; then
+                bt_txt="OK"
+            else
+                bt_txt="Powered — no devices in scan"
+            fi
+        elif [[ "${BT_PRESENT:-0}" -gt 0 && "$BT_POWERED" -eq 0 ]]; then
+            bt_txt="FAIL — adapter not powered"
         else
-            bt_txt="FAIL"
+            bt_txt="FAIL — adapter not detected"
         fi
     fi
     if [[ $EXPECTED_ETH_SPEED -gt 0 ]]; then
@@ -757,7 +833,8 @@ print_summary() {
     local wifi_status="$pass" bt_status="$pass" eth_status="$pass"
     [[ "$wifi_txt" == "FAIL" ]] && wifi_status="$fail"
     [[ "$wifi_txt" == "N/A" ]] && wifi_status="${CYAN} N/A  ${NC}"
-    [[ "$bt_txt" == "FAIL" ]] && bt_status="$fail"
+    [[ "$bt_txt" == "FAIL"* ]] && bt_status="$fail"
+    [[ "$bt_txt" == "Adapter found but NOT"* ]] && bt_status="$warn"
     [[ "$bt_txt" == "N/A" ]] && bt_status="${CYAN} N/A  ${NC}"
     [[ "$eth_txt" == No\ cable* ]] && eth_status="$warn"
     [[ "$eth_txt" == "N/A" ]] && eth_status="${CYAN} N/A  ${NC}"
@@ -785,8 +862,15 @@ print_summary() {
     # Manual test: Audio jack
     if [[ $HAS_AUDIO_JACK -eq 1 ]]; then
         local audio_status="$pass"
-        [[ "$AUDIO_JACK_RESULT" == "FAIL" ]] && { audio_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true; }
-        echo -e "║  Audio Jack      │ $audio_status │ 3.5mm audio confirmed"
+        if [[ "$AUDIO_JACK_RESULT" == "FAIL" ]]; then
+            audio_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
+            echo -e "║  Audio Jack      │ $audio_status │ 3.5mm audio FAILED"
+        elif [[ "$AUDIO_JACK_RESULT" == "SKIP" ]]; then
+            audio_status="$skip"
+            echo -e "║  Audio Jack      │ $audio_status │ Not tested"
+        else
+            echo -e "║  Audio Jack      │ $audio_status │ 3.5mm audio confirmed"
+        fi
     fi
     # Camera (manual test result)
     if [[ "$CAMERA_RESULT" == "PASS" ]]; then
