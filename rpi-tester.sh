@@ -340,7 +340,15 @@ check_network() {
             BT_PRESENT=1
             BT_ADDRESS=$(echo "$bt_show" | grep -oP 'Controller \K[0-9A-F:]+' || echo "")
             BT_NAME=$(echo "$bt_show" | grep -oP 'Name: \K.*' || echo "")
-            echo "$bt_show" | grep -q "Powered: yes" && BT_POWERED=1
+            if echo "$bt_show" | grep -q "Powered: yes"; then
+                BT_POWERED=1
+            else
+                # Try to power on the adapter
+                bluetoothctl power on &>/dev/null || true
+                sleep 1
+                bt_show=$(bluetoothctl show 2>/dev/null || echo "")
+                echo "$bt_show" | grep -q "Powered: yes" && BT_POWERED=1
+            fi
             echo "$bt_show" | grep -q "Discoverable: yes" && BT_DISCOVERABLE=1
         fi
     elif [[ $BT_PRESENT -eq 1 ]] && command -v bluetoothctl &>/dev/null; then
