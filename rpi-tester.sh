@@ -43,18 +43,16 @@ die() { echo "FATAL: $1" >&2; exit 1; }
 
 check_deps() {
     local missing=()
-    for cmd in stress-ng memtester bc vcgencmd lsusb; do
+    for cmd in bc vcgencmd lsusb; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
-        # Only attempt install if apt-get is likely to succeed (network + not already tried)
         if [[ ! -f /tmp/.rpi-test-deps-attempted ]]; then
             echo "Installing missing deps: ${missing[*]}" >&2
             if ! apt-get update -qq 2>&2; then
                 echo "WARNING: apt-get update failed — trying install anyway" >&2
             fi
-            # Install deps individually so one missing package doesn't block the rest
-            for pkg in stress-ng memtester bc usbutils; do
+            for pkg in bc usbutils; do
                 apt-get install -y -qq "$pkg" 2>/dev/null || true
             done
             # vcgencmd package varies by distro
@@ -63,7 +61,7 @@ check_deps() {
             touch /tmp/.rpi-test-deps-attempted
             # Re-check
             missing=()
-            for cmd in stress-ng memtester bc vcgencmd lsusb; do
+            for cmd in bc vcgencmd lsusb; do
                 command -v "$cmd" &>/dev/null || missing+=("$cmd")
             done
         fi
@@ -76,6 +74,17 @@ check_deps() {
     else
         MISSING_DEPS=""
     fi
+}
+
+# Install a test dependency on demand (only when the test will actually run)
+ensure_dep() {
+    local cmd="$1" pkg="$2"
+    command -v "$cmd" &>/dev/null && return 0
+    echo "Installing $pkg for test..." >&2
+    apt-get install -y -qq "$pkg" 2>/dev/null || true
+    command -v "$cmd" &>/dev/null && return 0
+    echo "WARNING: $cmd not available (install $pkg manually)" >&2
+    return 1
 }
 
 # --- System Identification ---
@@ -113,6 +122,9 @@ get_sysinfo() {
     elif echo "$MODEL" | grep -qi "Pi 3"; then
         EXPECTED_USB=4; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=100; HAS_WIFI=1; HAS_BT=1
         EXPECTED_HDMI=1; HAS_AUDIO_JACK=1
+    elif echo "$MODEL" | grep -qi "Pi 2"; then
+        EXPECTED_USB=4; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=100; HAS_WIFI=0; HAS_BT=0
+        EXPECTED_HDMI=1; HAS_AUDIO_JACK=1
     elif echo "$MODEL" | grep -qi "Zero 2"; then
         EXPECTED_USB=1; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=0; HAS_WIFI=1; HAS_BT=1
         EXPECTED_HDMI=1; HAS_AUDIO_JACK=0
@@ -131,7 +143,12 @@ get_sysinfo() {
 # --- Power & Thermal ---
 
 get_thermal() {
-    TEMP_IDLE=$(vcgencmd measure_temp 2>/dev/null | grep -oP '[0-9.]+' || echo "0")
+    # Temperature: try vcgencmd first, fall back to sysfs thermal zone
+    TEMP_IDLE=$(vcgencmd measure_temp 2>/dev/null | grep -oP '[0-9.]+' || echo "")
+    if [[ -z "$TEMP_IDLE" || "$TEMP_IDLE" == "0" ]]; then
+        local raw_temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo "0")
+        TEMP_IDLE=$(echo "scale=1; $raw_temp / 1000" | bc 2>/dev/null || echo "0")
+    fi
     THROTTLE_HEX=$(vcgencmd get_throttled 2>/dev/null | grep -oP '0x[0-9a-fA-F]+' || echo "0x0")
     THROTTLE_NOW=0; THROTTLE_HISTORY=0
     local val=$((THROTTLE_HEX))
@@ -146,7 +163,7 @@ get_thermal() {
 # --- CPU Stress ---
 
 run_cpu_stress() {
-    if ! command -v stress-ng &>/dev/null; then
+    if ! ensure_dep stress-ng stress-ng; then
         STRESS_RESULT="SKIP"; STRESS_MAX_TEMP="0"; STRESS_THROTTLED=0; STRESS_CLOCK="0"; return
     fi
     echo "Running CPU stress test (${STRESS_DURATION}s)..." >&2
@@ -155,7 +172,11 @@ run_cpu_stress() {
     stress-ng --cpu 0 --timeout "${STRESS_DURATION}s" --quiet &
     local pid=$!
     while kill -0 "$pid" 2>/dev/null; do
-        local t=$(vcgencmd measure_temp 2>/dev/null | grep -oP '[0-9.]+' || echo "0")
+        local t=$(vcgencmd measure_temp 2>/dev/null | grep -oP '[0-9.]+' || echo "")
+        if [[ -z "$t" ]]; then
+            local raw_t=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo "0")
+            t=$(echo "scale=1; $raw_t / 1000" | bc 2>/dev/null || echo "0")
+        fi
         local cmp=$(echo "$t > $max_temp" | bc 2>/dev/null || echo "0")
         [[ "$cmp" == "1" ]] && max_temp=$t
         # Check for active throttling during stress (bits 0,2: undervolt, hard throttle — NOT bit 3 soft temp limit)
@@ -173,7 +194,7 @@ run_cpu_stress() {
 # --- Memory ---
 
 run_memory_test() {
-    if ! command -v memtester &>/dev/null; then
+    if ! ensure_dep memtester memtester; then
         MEM_RESULT="SKIP"; MEM_ERRORS=0; return
     fi
     local avail=$(free -m | awk '/Mem:/{print $7}')
@@ -231,13 +252,14 @@ check_usb() {
         USB3_DEVS=$(echo "$USB_TREE" | grep -A20 "5000M" | grep -v "root_hub" | grep -c "Class=" 2>/dev/null) || USB3_DEVS=0
         USB_PORT_DETAIL="USB2: ${USB2_DEVS}/2, USB3: ${USB3_DEVS}/2"
         [[ $USB2_DEVS -lt 2 || $USB3_DEVS -lt 2 ]] && USB_PORT_ERRORS="incomplete" || true
-    elif echo "$MODEL" | grep -qi "Pi 3"; then
-        # Pi 3B/3B+: LAN9514/LAN7515 is internal USB hub + Ethernet combo
+    elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2"; then
+        # Pi 2B/3B/3B+: LAN9514 (Pi 2B & 3B) or LAN7515 (3B+) internal USB hub + Ethernet combo
         # Topology: root_hub -> LAN9514 hub (0424:9514) -> Ethernet (0424:ec00) + 4 external USB ports
+        # Pi 3B+ uses LAN7515 (0424:7800) for both hub and Ethernet
         LAN_HUB=$(echo "$USB_LIST" | grep -c "0424:9514\|0424:7800") || true
         LAN_ETH=$(echo "$USB_LIST" | grep -c "0424:ec00\|0424:7800") || true
         # Count occupied physical USB ports from tree topology
-        # Pi 3B/3B+: 4 physical ports split across hub/4p (top) and hub/3p (LAN sub-hub)
+        # 4 physical ports split across hub/4p (top) and hub/3p (LAN sub-hub)
         # Top-level ports: direct children (8-space) of hub/4p, excluding the internal LAN sub-hub
         local _p1 _p2
         _p1=$(echo "$USB_TREE" | grep "^        |__ Port" | grep -cv "Driver=hub/3p") || true
@@ -249,6 +271,19 @@ check_usb() {
             USB_PORT_ERRORS="LAN9514 hub missing — USB/Ethernet chip may be dead"
         elif [[ "$LAN_ETH" -eq 0 ]]; then
             USB_PORT_ERRORS="Ethernet adapter not enumerated under LAN hub"
+        fi
+    elif echo "$MODEL" | grep -qi "Zero"; then
+        # Pi Zero / Zero W / Zero 2 W: Single micro USB OTG port (no internal hub)
+        # In USB host mode (via OTG adapter), expect a single root hub with minimal topology
+        local otg_devs
+        otg_devs=$(echo "$USB_LIST" | grep -cv "root hub\|^$") || true
+        USB_PORTS_USED=${otg_devs}
+        USB_PORT_DETAIL="OTG port: ${otg_devs} device(s) attached"
+        # No internal hub expected — just confirm the USB controller is present
+        local usb_ctrl
+        usb_ctrl=$(echo "$USB_LIST" | grep -c "root hub") || true
+        if [[ "$usb_ctrl" -eq 0 ]]; then
+            USB_PORT_ERRORS="USB controller not detected"
         fi
     else
         USB_PORT_DETAIL=""
@@ -289,9 +324,9 @@ check_network() {
         fi
         # Scan count
         if command -v iwlist &>/dev/null; then
-            WIFI_SCAN_COUNT=$(iwlist "$WIFI_IFACE" scan 2>/dev/null | grep -c "Cell" 2>/dev/null || true)
+            WIFI_SCAN_COUNT=$(timeout 10 iwlist "$WIFI_IFACE" scan 2>/dev/null | grep -c "Cell" 2>/dev/null || true)
         elif command -v iw &>/dev/null; then
-            WIFI_SCAN_COUNT=$(iw dev "$WIFI_IFACE" scan 2>/dev/null | grep -c "BSS " 2>/dev/null || true)
+            WIFI_SCAN_COUNT=$(timeout 10 iw dev "$WIFI_IFACE" scan 2>/dev/null | grep -c "BSS " 2>/dev/null || true)
         else
             WIFI_SCAN_COUNT=$WIFI_UP
         fi
@@ -335,7 +370,7 @@ check_network() {
 
     # Fall back to bluetoothctl if hciconfig wasn't available
     if [[ $BT_PRESENT -eq 0 ]] && command -v bluetoothctl &>/dev/null; then
-        local bt_show=$(bluetoothctl show 2>/dev/null || echo "")
+        local bt_show=$(timeout 5 bluetoothctl show 2>/dev/null || echo "")
         if echo "$bt_show" | grep -q "Controller"; then
             BT_PRESENT=1
             BT_ADDRESS=$(echo "$bt_show" | grep -oP 'Controller \K[0-9A-F:]+' || echo "")
@@ -344,16 +379,16 @@ check_network() {
                 BT_POWERED=1
             else
                 # Try to power on the adapter
-                bluetoothctl power on &>/dev/null || true
+                timeout 5 bluetoothctl power on &>/dev/null || true
                 sleep 1
-                bt_show=$(bluetoothctl show 2>/dev/null || echo "")
+                bt_show=$(timeout 5 bluetoothctl show 2>/dev/null || echo "")
                 echo "$bt_show" | grep -q "Powered: yes" && BT_POWERED=1
             fi
             echo "$bt_show" | grep -q "Discoverable: yes" && BT_DISCOVERABLE=1
         fi
     elif [[ $BT_PRESENT -eq 1 ]] && command -v bluetoothctl &>/dev/null; then
         # Supplement hciconfig data with bluetoothctl info
-        local bt_show=$(bluetoothctl show 2>/dev/null || echo "")
+        local bt_show=$(timeout 5 bluetoothctl show 2>/dev/null || echo "")
         BT_NAME=$(echo "$bt_show" | grep -oP 'Name: \K.*' || echo "")
         echo "$bt_show" | grep -q "Discoverable: yes" && BT_DISCOVERABLE=1
     fi
@@ -364,8 +399,8 @@ check_network() {
         local bt_scan_pid=$!
         sleep 5
         wait "$bt_scan_pid" 2>/dev/null || true
-        BT_DEVICES=$(bluetoothctl devices 2>/dev/null | wc -l || echo "0")
-        bluetoothctl scan off &>/dev/null 2>&1 || true
+        BT_DEVICES=$(timeout 3 bluetoothctl devices 2>/dev/null | wc -l || echo "0")
+        timeout 3 bluetoothctl scan off &>/dev/null 2>&1 || true
         # If we found any devices, scan is working
         [[ "$BT_DEVICES" -gt 0 ]] && BT_SCAN_OK=1
     elif [[ $BT_POWERED -eq 1 ]] && command -v hcitool &>/dev/null; then
@@ -685,9 +720,11 @@ print_summary() {
     stor_status="$pass"
 
     # USB
-    if [[ $USB_CONTROLLERS -lt 2 ]] && [[ $EXPECTED_USB -ge 4 ]] && ! echo "$MODEL" | grep -qi "Pi 3"; then
+    if [[ $USB_CONTROLLERS -lt 2 ]] && [[ $EXPECTED_USB -ge 4 ]] && ! echo "$MODEL" | grep -qi "Pi 3\|Pi 2"; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
-    elif echo "$MODEL" | grep -qi "Pi 3" && [[ "${LAN_HUB:-0}" -eq 0 ]]; then
+    elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2" && ! echo "$MODEL" | grep -qi "Zero" && [[ "${LAN_HUB:-0}" -eq 0 ]]; then
+        usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
+    elif echo "$MODEL" | grep -qi "Zero" && [[ -n "$USB_PORT_ERRORS" ]]; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
     elif [[ "$USB_PORT_ERRORS" == "UNSUPPORTED_MODEL" ]]; then
         usb_status="$warn"
@@ -791,25 +828,36 @@ print_summary() {
         fi
         echo -e "║  USB 2.0         │ $usb2_status │ ${usb2_txt}"
         echo -e "║  USB 3.0         │ $usb3_status │ ${usb3_txt}"
-    elif echo "$MODEL" | grep -qi "Pi 3"; then
-        local usb_pi3_status="$pass"
-        local usb_pi3_txt=""
+    elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2" && ! echo "$MODEL" | grep -qi "Zero"; then
+        local usb_hub_status="$pass"
+        local usb_hub_txt=""
         if [[ "${LAN_HUB:-0}" -eq 0 ]]; then
-            usb_pi3_status="$fail"; usb_pi3_txt="Internal USB hub NOT detected — chip may be dead"
+            usb_hub_status="$fail"; usb_hub_txt="Internal USB hub NOT detected — chip may be dead"
         elif [[ "${LAN_ETH:-0}" -eq 0 ]]; then
-            usb_pi3_status="$warn"; usb_pi3_txt="Hub OK but Ethernet adapter missing"
+            usb_hub_status="$warn"; usb_hub_txt="Hub OK but Ethernet adapter missing"
         elif [[ "${USB_PORTS_USED:-0}" -gt 0 ]]; then
-            usb_pi3_txt="${USB_PORTS_USED}/4 ports in use"
+            usb_hub_txt="${USB_PORTS_USED}/4 ports in use"
         else
-            usb_pi3_txt="No external devices connected"
+            usb_hub_txt="No external devices connected"
         fi
-        echo -e "║  USB             │ $usb_pi3_status │ ${usb_pi3_txt}"
+        echo -e "║  USB             │ $usb_hub_status │ ${usb_hub_txt}"
+    elif echo "$MODEL" | grep -qi "Zero"; then
+        local usb_zero_status="$pass"
+        local usb_zero_txt=""
+        if [[ -n "$USB_PORT_ERRORS" ]]; then
+            usb_zero_status="$fail"; usb_zero_txt="USB controller not detected"
+        elif [[ "${USB_PORTS_USED:-0}" -gt 0 ]]; then
+            usb_zero_txt="OTG: ${USB_PORTS_USED} device(s) attached"
+        else
+            usb_zero_txt="OTG port OK (no devices)"
+        fi
+        echo -e "║  USB (OTG)       │ $usb_zero_status │ ${usb_zero_txt}"
     elif [[ "$USB_PORT_ERRORS" == "UNSUPPORTED_MODEL" ]]; then
         echo -e "║  USB             │ $warn │ Model needs USB validation support"
     else
         echo -e "║  USB             │ $usb_status │ ${USB_DEVICES} devices detected"
     fi
-    local wifi_txt="N/A" bt_txt="N/A" eth_txt="N/A"
+    local wifi_txt="" bt_txt="" eth_txt=""
     if [[ $HAS_WIFI -eq 1 ]]; then
         if [[ -n "$WIFI_IFACE" ]] && [[ "${WIFI_SCAN_COUNT:-0}" -gt 0 ]] 2>/dev/null; then
             wifi_txt="${WIFI_BAND:+${WIFI_BAND} }${WIFI_SPEED:+${WIFI_SPEED} Mbps}"
@@ -840,15 +888,19 @@ print_summary() {
     fi
     local wifi_status="$pass" bt_status="$pass" eth_status="$pass"
     [[ "$wifi_txt" == "FAIL" ]] && wifi_status="$fail"
-    [[ "$wifi_txt" == "N/A" ]] && wifi_status="${CYAN} N/A  ${NC}"
     [[ "$bt_txt" == "FAIL"* ]] && bt_status="$fail"
     [[ "$bt_txt" == "Adapter found but NOT"* ]] && bt_status="$warn"
-    [[ "$bt_txt" == "N/A" ]] && bt_status="${CYAN} N/A  ${NC}"
     [[ "$eth_txt" == No\ cable* ]] && eth_status="$warn"
-    [[ "$eth_txt" == "N/A" ]] && eth_status="${CYAN} N/A  ${NC}"
-    echo -e "║  Ethernet        │ $eth_status │ ${eth_txt}"
-    echo -e "║  WiFi            │ $wifi_status │ ${wifi_txt}"
-    echo -e "║  Bluetooth       │ $bt_status │ ${bt_txt}"
+    # Only print lines for hardware the model actually has
+    if [[ $EXPECTED_ETH_SPEED -gt 0 ]]; then
+        echo -e "║  Ethernet        │ $eth_status │ ${eth_txt}"
+    fi
+    if [[ $HAS_WIFI -eq 1 ]]; then
+        echo -e "║  WiFi            │ $wifi_status │ ${wifi_txt}"
+    fi
+    if [[ $HAS_BT -eq 1 ]]; then
+        echo -e "║  Bluetooth       │ $bt_status │ ${bt_txt}"
+    fi
     if [[ $HDMI_CONNECTED -gt 0 ]]; then
         local res=$(echo "$HDMI_STATUS" | grep -oP '\d+x\d+@[0-9.]+' | head -1 || echo "connected")
         local hdmi_detail="Connected, ${res}"
