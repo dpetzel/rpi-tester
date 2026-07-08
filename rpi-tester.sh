@@ -17,6 +17,9 @@
 
 set -euo pipefail
 
+# Ensure cwd is on a fast filesystem (avoids I/O issues on FAT/USB drives)
+cd /tmp
+
 OUTPUT="$HOME/rpi-test-results.json"
 STRESS_DURATION=60
 MEMTEST_MB=""  # auto-calculated
