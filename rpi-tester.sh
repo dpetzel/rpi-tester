@@ -110,6 +110,7 @@ get_sysinfo() {
     fi
 
     # Determine expected values based on model string
+    IS_COMPUTE_MODULE=0
     if echo "$MODEL" | grep -qi "Pi 5"; then
         EXPECTED_USB=4; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=1000; HAS_WIFI=1; HAS_BT=1
         EXPECTED_HDMI=2; HAS_AUDIO_JACK=0
@@ -117,10 +118,11 @@ get_sysinfo() {
         EXPECTED_USB=4; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=1000; HAS_WIFI=1; HAS_BT=1
         EXPECTED_HDMI=1; HAS_AUDIO_JACK=0
     elif echo "$MODEL" | grep -qi "Compute Module 4"; then
-        # CM4: single USB 2.0 interface routed through carrier board
-        # WiFi/BT is optional (depends on SKU) — detect at runtime
-        EXPECTED_USB=1; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=1000
-        EXPECTED_HDMI=2; HAS_AUDIO_JACK=0
+        # CM4: Only test on-module hardware. Carrier-board features
+        # (Ethernet, HDMI, audio, USB ports) are not CM4 functionality.
+        EXPECTED_USB=1; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=0
+        EXPECTED_HDMI=0; HAS_AUDIO_JACK=0
+        IS_COMPUTE_MODULE=1
         if ip -o link show 2>/dev/null | grep -q 'wlan'; then
             HAS_WIFI=1; HAS_BT=1
         else
@@ -273,19 +275,14 @@ check_usb() {
         USB_PORT_DETAIL="USB2: ${USB2_DEVS}/2, USB3: ${USB3_DEVS}/2"
         [[ $USB2_DEVS -lt 2 || $USB3_DEVS -lt 2 ]] && USB_PORT_ERRORS="incomplete" || true
     elif echo "$MODEL" | grep -qi "Compute Module 4"; then
-        # CM4: Single USB 2.0 interface routed to carrier board
-        # Carrier board topology is unknown — best we can do is confirm controller is alive
-        # and at least one USB device is enumerated
-        local cm4_usb_ctrl cm4_devs
+        # CM4: Only verify the USB controller is alive (on-module hardware).
+        # Device count is carrier-board-dependent and not tested.
+        local cm4_usb_ctrl
         cm4_usb_ctrl=$(echo "$USB_LIST" | grep -c "root hub") || true
-        cm4_devs=$(echo "$USB_LIST" | grep -cv "root hub\|^$") || true
-        CM4_USB_DEVS=${cm4_devs}
-        USB_PORTS_USED=${cm4_devs}
-        USB_PORT_DETAIL="USB2 (carrier): ${cm4_devs} device(s) attached"
+        USB_PORT_DETAIL="USB controller present"
         if [[ "$cm4_usb_ctrl" -eq 0 ]]; then
             USB_PORT_ERRORS="USB controller not detected"
-        elif [[ "$cm4_devs" -eq 0 ]]; then
-            USB_PORT_ERRORS="No USB devices found — carrier board USB may not be connected"
+            USB_PORT_DETAIL="USB controller NOT detected"
         fi
     elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2"; then
         # Pi 2B/3B/3B+: LAN9514 (Pi 2B & 3B) or LAN7515 (3B+) internal USB hub + Ethernet combo
@@ -662,6 +659,7 @@ echo "Model: $MODEL | RAM: ${RAM_MB}MB | Serial: $SERIAL" >&2
 check_display
 check_camera
 
+
 # Manual tests first (so user can walk away during automated tests)
 if [[ $NO_MANUAL -eq 0 ]]; then
     run_manual_tests
@@ -760,8 +758,6 @@ print_summary() {
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
     elif echo "$MODEL" | grep -qi "Compute Module 4" && [[ "$USB_PORT_ERRORS" == "USB controller not detected" ]]; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
-    elif echo "$MODEL" | grep -qi "Compute Module 4" && [[ -n "$USB_PORT_ERRORS" ]]; then
-        usb_status="$warn"
     elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2" && ! echo "$MODEL" | grep -qi "Zero" && [[ "${LAN_HUB:-0}" -eq 0 ]]; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
     elif echo "$MODEL" | grep -qi "Zero" && [[ -n "$USB_PORT_ERRORS" ]]; then
@@ -871,17 +867,11 @@ print_summary() {
         echo -e "║  USB 3.0         │ $usb3_status │ ${usb3_txt}"
     elif echo "$MODEL" | grep -qi "Compute Module 4"; then
         local cm4_usb_status="$pass"
-        local cm4_usb_txt=""
+        local cm4_usb_txt="Controller OK"
         if [[ "$USB_PORT_ERRORS" == "USB controller not detected" ]]; then
             cm4_usb_status="$fail"; cm4_usb_txt="USB controller not detected"
-        elif [[ -n "$USB_PORT_ERRORS" ]]; then
-            cm4_usb_status="$warn"; cm4_usb_txt="Controller OK, no devices (carrier board)"
-        elif [[ "${CM4_USB_DEVS:-0}" -gt 0 ]]; then
-            cm4_usb_txt="${CM4_USB_DEVS} device(s) via carrier board"
-        else
-            cm4_usb_txt="Controller OK (no devices)"
         fi
-        echo -e "║  USB (carrier)   │ $cm4_usb_status │ ${cm4_usb_txt}"
+        echo -e "║  USB Controller  │ $cm4_usb_status │ ${cm4_usb_txt}"
     elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2" && ! echo "$MODEL" | grep -qi "Zero"; then
         local usb_hub_status="$pass"
         local usb_hub_txt=""
@@ -955,7 +945,7 @@ print_summary() {
     if [[ $HAS_BT -eq 1 ]]; then
         echo -e "║  Bluetooth       │ $bt_status │ ${bt_txt}"
     fi
-    if [[ $HDMI_CONNECTED -gt 0 ]]; then
+    if [[ $IS_COMPUTE_MODULE -eq 0 ]] && [[ $HDMI_CONNECTED -gt 0 ]]; then
         local res=$(echo "$HDMI_STATUS" | grep -oP '\d+x\d+@[0-9.]+' | head -1 || echo "connected")
         local hdmi_detail="Connected, ${res}"
         local hdmi_status="$pass"
@@ -966,7 +956,7 @@ print_summary() {
             fi
         done
         echo -e "║  HDMI            │ $hdmi_status │ ${hdmi_detail}"
-    else
+    elif [[ $IS_COMPUTE_MODULE -eq 0 ]]; then
         for ((i=0; i<${#HDMI_VISUAL[@]}; i++)); do
             local hdmi_v_status="$pass"
             [[ "${HDMI_VISUAL[$i]}" == "FAIL" ]] && { hdmi_v_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true; }
@@ -986,14 +976,16 @@ print_summary() {
             echo -e "║  Audio Jack      │ $audio_status │ 3.5mm audio confirmed"
         fi
     fi
-    # Camera (manual test result)
-    if [[ "$CAMERA_RESULT" == "PASS" ]]; then
-        echo -e "║  Camera (CSI)    │ $pass │ Detected and confirmed"
-    elif [[ "$CAMERA_RESULT" == "FAIL" ]]; then
-        echo -e "║  Camera (CSI)    │ $fail │ Connected but not detected"
-        overall="${RED}FAIL${NC}"; ((issues++)) || true
-    elif [[ "$CAMERA_RESULT" == "SKIP" ]]; then
-        echo -e "║  Camera (CSI)    │ $skip │ No camera connected"
+    # Camera (manual test result) — skip for compute modules (carrier-board-dependent)
+    if [[ $IS_COMPUTE_MODULE -eq 0 ]]; then
+        if [[ "$CAMERA_RESULT" == "PASS" ]]; then
+            echo -e "║  Camera (CSI)    │ $pass │ Detected and confirmed"
+        elif [[ "$CAMERA_RESULT" == "FAIL" ]]; then
+            echo -e "║  Camera (CSI)    │ $fail │ Connected but not detected"
+            overall="${RED}FAIL${NC}"; ((issues++)) || true
+        elif [[ "$CAMERA_RESULT" == "SKIP" ]]; then
+            echo -e "║  Camera (CSI)    │ $skip │ No camera connected"
+        fi
     fi
     echo -e "╠══════════════════════════════════════════════════════════════╣"
     echo -e "║  VERDICT:  $overall ($issues issues)"
