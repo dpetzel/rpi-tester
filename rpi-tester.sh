@@ -774,7 +774,8 @@ print_summary() {
     # RAM in friendly format
     # Map reported RAM to nominal size (GPU/kernel eat some)
     local ram_gb
-    if [[ $RAM_MB -gt 7000 ]]; then ram_gb=8
+    if [[ $RAM_MB -gt 14000 ]]; then ram_gb=16
+    elif [[ $RAM_MB -gt 7000 ]]; then ram_gb=8
     elif [[ $RAM_MB -gt 3500 ]]; then ram_gb=4
     elif [[ $RAM_MB -gt 1800 ]]; then ram_gb=2
     elif [[ $RAM_MB -gt 900 ]]; then ram_gb=1
