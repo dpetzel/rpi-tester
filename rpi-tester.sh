@@ -202,10 +202,17 @@ run_memory_test() {
     [[ $MEMTEST_MB -lt 32 ]] && MEMTEST_MB=32
     [[ $MEMTEST_MB -gt 512 ]] && MEMTEST_MB=512
     echo "Running memtester (${MEMTEST_MB}MB, 1 pass)..." >&2
-    if memtester "${MEMTEST_MB}M" 1 >&2; then
+    local memtest_output
+    memtest_output=$(memtester "${MEMTEST_MB}M" 1 2>&1)
+    local memtest_exit=$?
+    # Print only the final results (strip spinner/backspace noise)
+    echo "$memtest_output" | col -b | grep -E '(Loop|ok$|FAILURE)' >&2
+    if [[ $memtest_exit -eq 0 ]]; then
         MEM_RESULT="PASS"; MEM_ERRORS=0
     else
         MEM_RESULT="FAIL"; MEM_ERRORS=1
+        # On failure, print full cleaned output for debugging
+        echo "$memtest_output" | col -b >&2
     fi
 }
 
@@ -661,6 +668,7 @@ if [[ $QUICK -eq 0 ]]; then
 
     echo "--- Memory Test ---" >&2
     run_memory_test
+    echo "--- memtester finished: result=${MEM_RESULT}, errors=${MEM_ERRORS} ---" >&2
 else
     echo "--- Skipping CPU Stress (--quick) ---" >&2
     STRESS_RESULT="SKIP"; STRESS_MAX_TEMP="0"; STRESS_THROTTLED=0; STRESS_CLOCK="0"
