@@ -116,6 +116,16 @@ get_sysinfo() {
     elif echo "$MODEL" | grep -qi "Pi 400"; then
         EXPECTED_USB=4; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=1000; HAS_WIFI=1; HAS_BT=1
         EXPECTED_HDMI=1; HAS_AUDIO_JACK=0
+    elif echo "$MODEL" | grep -qi "Compute Module 4"; then
+        # CM4: single USB 2.0 interface routed through carrier board
+        # WiFi/BT is optional (depends on SKU) — detect at runtime
+        EXPECTED_USB=1; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=1000
+        EXPECTED_HDMI=2; HAS_AUDIO_JACK=0
+        if ip -o link show 2>/dev/null | grep -q 'wlan'; then
+            HAS_WIFI=1; HAS_BT=1
+        else
+            HAS_WIFI=0; HAS_BT=0
+        fi
     elif echo "$MODEL" | grep -qi "Pi 4"; then
         EXPECTED_USB=4; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=1000; HAS_WIFI=1; HAS_BT=1
         EXPECTED_HDMI=2; HAS_AUDIO_JACK=1
@@ -262,6 +272,21 @@ check_usb() {
         USB3_DEVS=$(echo "$USB_TREE" | grep -A20 "5000M" | grep -v "root_hub" | grep -c "Class=" 2>/dev/null) || USB3_DEVS=0
         USB_PORT_DETAIL="USB2: ${USB2_DEVS}/2, USB3: ${USB3_DEVS}/2"
         [[ $USB2_DEVS -lt 2 || $USB3_DEVS -lt 2 ]] && USB_PORT_ERRORS="incomplete" || true
+    elif echo "$MODEL" | grep -qi "Compute Module 4"; then
+        # CM4: Single USB 2.0 interface routed to carrier board
+        # Carrier board topology is unknown — best we can do is confirm controller is alive
+        # and at least one USB device is enumerated
+        local cm4_usb_ctrl cm4_devs
+        cm4_usb_ctrl=$(echo "$USB_LIST" | grep -c "root hub") || true
+        cm4_devs=$(echo "$USB_LIST" | grep -cv "root hub\|^$") || true
+        CM4_USB_DEVS=${cm4_devs}
+        USB_PORTS_USED=${cm4_devs}
+        USB_PORT_DETAIL="USB2 (carrier): ${cm4_devs} device(s) attached"
+        if [[ "$cm4_usb_ctrl" -eq 0 ]]; then
+            USB_PORT_ERRORS="USB controller not detected"
+        elif [[ "$cm4_devs" -eq 0 ]]; then
+            USB_PORT_ERRORS="No USB devices found — carrier board USB may not be connected"
+        fi
     elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2"; then
         # Pi 2B/3B/3B+: LAN9514 (Pi 2B & 3B) or LAN7515 (3B+) internal USB hub + Ethernet combo
         # Topology: root_hub -> LAN9514 hub (0424:9514) -> Ethernet (0424:ec00) + 4 external USB ports
@@ -733,6 +758,10 @@ print_summary() {
     # USB
     if [[ $USB_CONTROLLERS -lt 2 ]] && [[ $EXPECTED_USB -ge 4 ]] && ! echo "$MODEL" | grep -qi "Pi 3\|Pi 2"; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
+    elif echo "$MODEL" | grep -qi "Compute Module 4" && [[ "$USB_PORT_ERRORS" == "USB controller not detected" ]]; then
+        usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
+    elif echo "$MODEL" | grep -qi "Compute Module 4" && [[ -n "$USB_PORT_ERRORS" ]]; then
+        usb_status="$warn"
     elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2" && ! echo "$MODEL" | grep -qi "Zero" && [[ "${LAN_HUB:-0}" -eq 0 ]]; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
     elif echo "$MODEL" | grep -qi "Zero" && [[ -n "$USB_PORT_ERRORS" ]]; then
@@ -840,6 +869,19 @@ print_summary() {
         fi
         echo -e "║  USB 2.0         │ $usb2_status │ ${usb2_txt}"
         echo -e "║  USB 3.0         │ $usb3_status │ ${usb3_txt}"
+    elif echo "$MODEL" | grep -qi "Compute Module 4"; then
+        local cm4_usb_status="$pass"
+        local cm4_usb_txt=""
+        if [[ "$USB_PORT_ERRORS" == "USB controller not detected" ]]; then
+            cm4_usb_status="$fail"; cm4_usb_txt="USB controller not detected"
+        elif [[ -n "$USB_PORT_ERRORS" ]]; then
+            cm4_usb_status="$warn"; cm4_usb_txt="Controller OK, no devices (carrier board)"
+        elif [[ "${CM4_USB_DEVS:-0}" -gt 0 ]]; then
+            cm4_usb_txt="${CM4_USB_DEVS} device(s) via carrier board"
+        else
+            cm4_usb_txt="Controller OK (no devices)"
+        fi
+        echo -e "║  USB (carrier)   │ $cm4_usb_status │ ${cm4_usb_txt}"
     elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2" && ! echo "$MODEL" | grep -qi "Zero"; then
         local usb_hub_status="$pass"
         local usb_hub_txt=""
