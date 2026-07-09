@@ -46,7 +46,7 @@ die() { echo "FATAL: $1" >&2; exit 1; }
 
 check_deps() {
     local missing=()
-    for cmd in bc vcgencmd lsusb; do
+    for cmd in bc vcgencmd lsusb xxd; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -55,7 +55,7 @@ check_deps() {
             if ! apt-get update -qq 2>&2; then
                 echo "WARNING: apt-get update failed — trying install anyway" >&2
             fi
-            for pkg in bc usbutils; do
+            for pkg in bc usbutils xxd; do
                 apt-get install -y -qq "$pkg" 2>/dev/null || true
             done
             # vcgencmd package varies by distro
@@ -64,7 +64,7 @@ check_deps() {
             touch /tmp/.rpi-test-deps-attempted
             # Re-check
             missing=()
-            for cmd in bc vcgencmd lsusb; do
+            for cmd in bc vcgencmd lsusb xxd; do
                 command -v "$cmd" &>/dev/null || missing+=("$cmd")
             done
         fi
@@ -152,6 +152,114 @@ get_sysinfo() {
     else
         EXPECTED_USB=4; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=100; HAS_WIFI=0; HAS_BT=0
         EXPECTED_HDMI=1; HAS_AUDIO_JACK=0
+    fi
+}
+
+# --- Board Variant Detection (CM4/CM5) ---
+
+detect_board_variant() {
+    # Reads the extended board revision from device-tree or OTP to determine
+    # WiFi and eMMC presence on Compute Modules. Derives the product SKU.
+    #
+    # For CM4 (OTP register 33 / rpi-boardrev-ext):
+    #   Bit 30: 0 = WiFi fitted, 1 = No WiFi
+    #   Bit 31: 0 = eMMC fitted, 1 = No eMMC (Lite)
+
+    VARIANT_WIFI="unknown"
+    VARIANT_EMMC="unknown"
+    VARIANT_EMMC_SIZE_GB=""
+    VARIANT_SKU=""
+    BOARDREV_EXT_HEX=""
+
+    # Only relevant for Compute Modules
+    if [[ $IS_COMPUTE_MODULE -eq 0 ]]; then
+        return
+    fi
+
+    # Read extended board revision from device-tree (preferred) or OTP
+    local ext_raw=""
+    if [[ -f /proc/device-tree/chosen/rpi-boardrev-ext ]]; then
+        if command -v xxd &>/dev/null; then
+            ext_raw=$(cat /proc/device-tree/chosen/rpi-boardrev-ext | xxd -p | tr -d '\n')
+        fi
+    fi
+    # Fallback to vcgencmd OTP dump
+    if [[ -z "$ext_raw" ]] && command -v vcgencmd &>/dev/null; then
+        ext_raw=$(vcgencmd otp_dump 2>/dev/null | grep "^33:" | cut -d: -f2 || echo "")
+    fi
+
+    if [[ -z "$ext_raw" ]]; then
+        return
+    fi
+
+    BOARDREV_EXT_HEX="0x${ext_raw}"
+    local ext_val=$((0x${ext_raw}))
+
+    # Decode WiFi bit (bit 30): 0 = has WiFi, 1 = no WiFi
+    if [[ $((ext_val >> 30 & 1)) -eq 0 ]]; then
+        VARIANT_WIFI="yes"
+    else
+        VARIANT_WIFI="no"
+    fi
+
+    # Decode eMMC bit (bit 31): 0 = has eMMC, 1 = no eMMC (Lite)
+    if [[ $((ext_val >> 31 & 1)) -eq 0 ]]; then
+        VARIANT_EMMC="yes"
+    else
+        VARIANT_EMMC="no"
+    fi
+
+    # If eMMC is present, try to detect its size
+    if [[ "$VARIANT_EMMC" == "yes" ]]; then
+        # eMMC typically shows up as mmcblk0 (distinct from SD which may be mmcblk1 on CM4)
+        # On CM4 with eMMC, the eMMC is the internal storage device
+        local emmc_dev=""
+        if [[ -d /sys/class/mmc_host/mmc0/mmc0:0001 ]]; then
+            emmc_dev="/dev/mmcblk0"
+        fi
+        if [[ -n "$emmc_dev" && -b "$emmc_dev" ]]; then
+            local emmc_bytes=$(blockdev --getsize64 "$emmc_dev" 2>/dev/null || echo "0")
+            if [[ "$emmc_bytes" -gt 0 ]]; then
+                # Convert to GB (round to nearest standard size: 8, 16, 32)
+                local emmc_gb=$(( (emmc_bytes + 500000000) / 1000000000 ))
+                # Snap to standard CM4 eMMC sizes
+                if [[ $emmc_gb -le 10 ]]; then
+                    VARIANT_EMMC_SIZE_GB="8"
+                elif [[ $emmc_gb -le 20 ]]; then
+                    VARIANT_EMMC_SIZE_GB="16"
+                else
+                    VARIANT_EMMC_SIZE_GB="32"
+                fi
+            fi
+        fi
+    fi
+
+    # Derive product SKU (e.g., CM4104032 = WiFi, 4GB RAM, 32GB eMMC)
+    # Format: CM4 [1=wifi, 0=no wifi] [RAM: 01/02/04/08] [eMMC: 000/008/016/032]
+    if echo "$MODEL" | grep -qi "Compute Module 4"; then
+        local sku_prefix="CM4"
+        local sku_wifi="0"
+        [[ "$VARIANT_WIFI" == "yes" ]] && sku_wifi="1"
+
+        # RAM from revision code (already decoded in ram_gb equivalent)
+        local sku_ram=""
+        if [[ $RAM_MB -gt 7000 ]]; then sku_ram="08"
+        elif [[ $RAM_MB -gt 3500 ]]; then sku_ram="04"
+        elif [[ $RAM_MB -gt 1800 ]]; then sku_ram="02"
+        else sku_ram="01"
+        fi
+
+        # eMMC size
+        local sku_emmc="000"
+        if [[ "$VARIANT_EMMC" == "yes" ]]; then
+            if [[ -n "$VARIANT_EMMC_SIZE_GB" ]]; then
+                printf -v sku_emmc "%03d" "$VARIANT_EMMC_SIZE_GB"
+            else
+                sku_emmc="???"  # eMMC present but size unknown
+            fi
+        fi
+
+        VARIANT_SKU="${sku_prefix}${sku_wifi}${sku_ram}${sku_emmc}"
     fi
 }
 
@@ -551,7 +659,14 @@ build_json() {
     "kernel": $(json_escape "$KERNEL"),
     "os": $(json_escape "$OS_VERSION"),
     "firmware": $(json_escape "$FW_VERSION"),
-    "eeprom": $(json_escape "$EEPROM")
+    "eeprom": $(json_escape "$EEPROM"),
+    "variant": {
+      "boardrev_ext": $(json_escape "${BOARDREV_EXT_HEX:-}"),
+      "wifi": $(json_escape "${VARIANT_WIFI:-}"),
+      "emmc": $(json_escape "${VARIANT_EMMC:-}"),
+      "emmc_size_gb": $(json_escape "${VARIANT_EMMC_SIZE_GB:-}"),
+      "sku": $(json_escape "${VARIANT_SKU:-}")
+    }
   },
   "thermal": {
     "idle_temp_c": $TEMP_IDLE,
@@ -653,6 +768,7 @@ EOF
 echo "=== Raspberry Pi Hardware Validation ===" >&2
 check_deps
 get_sysinfo
+detect_board_variant
 echo "Model: $MODEL | RAM: ${RAM_MB}MB | Serial: $SERIAL" >&2
 
 # Quick checks needed for manual prompts
@@ -826,6 +942,16 @@ print_summary() {
     echo -e "║  Model:    $MODEL"
     echo -e "║  Revision: $REVISION"
     echo -e "║  RAM:      ${ram_gb}"
+    if [[ -n "${VARIANT_SKU:-}" ]]; then
+        echo -e "║  SKU:      ${VARIANT_SKU}"
+        local wifi_label="No" emmc_label="No (Lite)"
+        [[ "$VARIANT_WIFI" == "yes" ]] && wifi_label="Yes"
+        if [[ "$VARIANT_EMMC" == "yes" ]]; then
+            emmc_label="${VARIANT_EMMC_SIZE_GB:-?}GB"
+        fi
+        echo -e "║  WiFi:     ${wifi_label}"
+        echo -e "║  eMMC:     ${emmc_label}"
+    fi
     echo -e "║  Serial:   $SERIAL"
     echo -e "║  OS:       $OS_VERSION"
     echo -e "║  Tested:   $(date +%Y-%m-%d\ %H:%M)"

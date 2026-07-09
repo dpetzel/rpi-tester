@@ -5,14 +5,14 @@ Shell script used to automate and standardize basic checks/tests on a Raspberry 
 ## Usage
 ### Quick Mode
 ```
-bash rpi-test.sh --quick
+bash rpi-tester.sh --quick
 ```
 
 
 
 ### Full Mode
 ```
-bash rpi-test.sh
+bash rpi-tester.sh
 ```
 
 Yolo!!
