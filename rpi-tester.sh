@@ -134,6 +134,10 @@ get_sysinfo() {
     elif echo "$MODEL" | grep -qi "Pi 3.*B+"; then
         EXPECTED_USB=4; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=1000; HAS_WIFI=1; HAS_BT=1
         EXPECTED_HDMI=1; HAS_AUDIO_JACK=1
+    elif echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A"; then
+        # Pi 3 Model A+ has 1 USB port, no Ethernet, no internal LAN hub chip
+        EXPECTED_USB=1; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=0; HAS_WIFI=1; HAS_BT=1
+        EXPECTED_HDMI=1; HAS_AUDIO_JACK=1
     elif echo "$MODEL" | grep -qi "Pi 3"; then
         EXPECTED_USB=4; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=100; HAS_WIFI=1; HAS_BT=1
         EXPECTED_HDMI=1; HAS_AUDIO_JACK=1
@@ -391,6 +395,18 @@ check_usb() {
         if [[ "$cm4_usb_ctrl" -eq 0 ]]; then
             USB_PORT_ERRORS="USB controller not detected"
             USB_PORT_DETAIL="USB controller NOT detected"
+        fi
+    elif echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A"; then
+        # Pi 3 Model A+: Single USB-A port, no internal LAN hub chip, no Ethernet
+        # Similar to Zero — just confirm USB controller is present
+        local otg_devs
+        otg_devs=$(echo "$USB_LIST" | grep -cv "root hub\|^$") || true
+        USB_PORTS_USED=${otg_devs}
+        USB_PORT_DETAIL="1 port: ${otg_devs} device(s) attached"
+        local usb_ctrl
+        usb_ctrl=$(echo "$USB_LIST" | grep -c "root hub") || true
+        if [[ "$usb_ctrl" -eq 0 ]]; then
+            USB_PORT_ERRORS="USB controller not detected"
         fi
     elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2"; then
         # Pi 2B/3B/3B+: LAN9514 (Pi 2B & 3B) or LAN7515 (3B+) internal USB hub + Ethernet combo
@@ -874,7 +890,9 @@ print_summary() {
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
     elif echo "$MODEL" | grep -qi "Compute Module 4" && [[ "$USB_PORT_ERRORS" == "USB controller not detected" ]]; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
-    elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2" && ! echo "$MODEL" | grep -qi "Zero" && [[ "${LAN_HUB:-0}" -eq 0 ]]; then
+    elif echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A" && [[ -n "$USB_PORT_ERRORS" ]]; then
+        usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
+    elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2" && ! echo "$MODEL" | grep -qi "Zero" && ! echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A" && [[ "${LAN_HUB:-0}" -eq 0 ]]; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
     elif echo "$MODEL" | grep -qi "Zero" && [[ -n "$USB_PORT_ERRORS" ]]; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
@@ -998,6 +1016,17 @@ print_summary() {
             cm4_usb_status="$fail"; cm4_usb_txt="USB controller not detected"
         fi
         echo -e "║  USB Controller  │ $cm4_usb_status │ ${cm4_usb_txt}"
+    elif echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A" && ! echo "$MODEL" | grep -qi "Zero"; then
+        local usb_3a_status="$pass"
+        local usb_3a_txt=""
+        if [[ -n "$USB_PORT_ERRORS" ]]; then
+            usb_3a_status="$fail"; usb_3a_txt="USB controller not detected"
+        elif [[ "${USB_PORTS_USED:-0}" -gt 0 ]]; then
+            usb_3a_txt="${USB_PORTS_USED} device(s) attached"
+        else
+            usb_3a_txt="Port OK (no devices)"
+        fi
+        echo -e "║  USB             │ $usb_3a_status │ ${usb_3a_txt}"
     elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2" && ! echo "$MODEL" | grep -qi "Zero"; then
         local usb_hub_status="$pass"
         local usb_hub_txt=""
