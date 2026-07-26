@@ -116,7 +116,7 @@ get_sysinfo() {
         EXPECTED_HDMI=2; HAS_AUDIO_JACK=0
     elif echo "$MODEL" | grep -qi "Pi 400"; then
         EXPECTED_USB=4; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=1000; HAS_WIFI=1; HAS_BT=1
-        EXPECTED_HDMI=1; HAS_AUDIO_JACK=0
+        EXPECTED_HDMI=2; HAS_AUDIO_JACK=0
     elif echo "$MODEL" | grep -qi "Compute Module 4"; then
         # CM4: Only test on-module hardware. Carrier-board features
         # (Ethernet, HDMI, audio, USB ports) are not CM4 functionality.
