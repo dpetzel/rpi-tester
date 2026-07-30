@@ -961,8 +961,8 @@ print_summary() {
     # Get pinout info if available
     local usb_desc="" eth_desc=""
     if command -v pinout &>/dev/null; then
-        usb_desc=$(pinout 2>/dev/null | grep "USB ports" | sed 's/.*: //')
-        eth_desc=$(pinout 2>/dev/null | grep "Ethernet" | sed 's/.*: //')
+        usb_desc=$(pinout 2>/dev/null | grep "USB ports" | sed 's/.*: //' || true)
+        eth_desc=$(pinout 2>/dev/null | grep "Ethernet" | sed 's/.*: //' || true)
     fi
     [[ -z "$usb_desc" ]] && usb_desc="${USB_CONTROLLERS} controllers, ${USB_DEVICES} devices"
 
