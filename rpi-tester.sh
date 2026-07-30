@@ -111,7 +111,18 @@ get_sysinfo() {
 
     # Determine expected values based on model string
     IS_COMPUTE_MODULE=0
-    if echo "$MODEL" | grep -qi "Pi 5"; then
+    if echo "$MODEL" | grep -qi "Compute Module 5"; then
+        # CM5: Only test on-module hardware. Carrier-board features
+        # (Ethernet, HDMI, audio, USB ports) are not CM5 functionality.
+        EXPECTED_USB=1; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=0
+        EXPECTED_HDMI=0; HAS_AUDIO_JACK=0
+        IS_COMPUTE_MODULE=1
+        if ip -o link show 2>/dev/null | grep -q 'wlan'; then
+            HAS_WIFI=1; HAS_BT=1
+        else
+            HAS_WIFI=0; HAS_BT=0
+        fi
+    elif echo "$MODEL" | grep -qi "Pi 5"; then
         EXPECTED_USB=4; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=1000; HAS_WIFI=1; HAS_BT=1
         EXPECTED_HDMI=2; HAS_AUDIO_JACK=0
     elif echo "$MODEL" | grep -qi "Pi 400"; then
@@ -239,15 +250,17 @@ detect_board_variant() {
     fi
 
     # Derive product SKU (e.g., CM4104032 = WiFi, 4GB RAM, 32GB eMMC)
-    # Format: CM4 [1=wifi, 0=no wifi] [RAM: 01/02/04/08] [eMMC: 000/008/016/032]
-    if echo "$MODEL" | grep -qi "Compute Module 4"; then
+    # Format: CM[4|5] [1=wifi, 0=no wifi] [RAM: 01/02/04/08/16] [eMMC: 000/008/016/032/064]
+    if echo "$MODEL" | grep -qi "Compute Module 4\|Compute Module 5"; then
         local sku_prefix="CM4"
+        echo "$MODEL" | grep -qi "Compute Module 5" && sku_prefix="CM5"
         local sku_wifi="0"
         [[ "$VARIANT_WIFI" == "yes" ]] && sku_wifi="1"
 
         # RAM from revision code (already decoded in ram_gb equivalent)
         local sku_ram=""
-        if [[ $RAM_MB -gt 7000 ]]; then sku_ram="08"
+        if [[ $RAM_MB -gt 14000 ]]; then sku_ram="16"
+        elif [[ $RAM_MB -gt 7000 ]]; then sku_ram="08"
         elif [[ $RAM_MB -gt 3500 ]]; then sku_ram="04"
         elif [[ $RAM_MB -gt 1800 ]]; then sku_ram="02"
         else sku_ram="01"
@@ -386,8 +399,8 @@ check_usb() {
         USB3_DEVS=$(echo "$USB_TREE" | grep -A20 "5000M" | grep -v "root_hub" | grep -c "Class=" 2>/dev/null) || USB3_DEVS=0
         USB_PORT_DETAIL="USB2: ${USB2_DEVS}/2, USB3: ${USB3_DEVS}/2"
         [[ $USB2_DEVS -lt 2 || $USB3_DEVS -lt 2 ]] && USB_PORT_ERRORS="incomplete" || true
-    elif echo "$MODEL" | grep -qi "Compute Module 4"; then
-        # CM4: Only verify the USB controller is alive (on-module hardware).
+    elif echo "$MODEL" | grep -qi "Compute Module 4\|Compute Module 5"; then
+        # CM4/CM5: Only verify the USB controller is alive (on-module hardware).
         # Device count is carrier-board-dependent and not tested.
         local cm4_usb_ctrl
         cm4_usb_ctrl=$(echo "$USB_LIST" | grep -c "root hub") || true
@@ -888,7 +901,7 @@ print_summary() {
     # USB
     if [[ $USB_CONTROLLERS -lt 2 ]] && [[ $EXPECTED_USB -ge 4 ]] && ! echo "$MODEL" | grep -qi "Pi 3\|Pi 2"; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
-    elif echo "$MODEL" | grep -qi "Compute Module 4" && [[ "$USB_PORT_ERRORS" == "USB controller not detected" ]]; then
+    elif echo "$MODEL" | grep -qi "Compute Module 4\|Compute Module 5" && [[ "$USB_PORT_ERRORS" == "USB controller not detected" ]]; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
     elif echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A" && [[ -n "$USB_PORT_ERRORS" ]]; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
@@ -1009,7 +1022,7 @@ print_summary() {
         fi
         echo -e "║  USB 2.0         │ $usb2_status │ ${usb2_txt}"
         echo -e "║  USB 3.0         │ $usb3_status │ ${usb3_txt}"
-    elif echo "$MODEL" | grep -qi "Compute Module 4"; then
+    elif echo "$MODEL" | grep -qi "Compute Module 4\|Compute Module 5"; then
         local cm4_usb_status="$pass"
         local cm4_usb_txt="Controller OK"
         if [[ "$USB_PORT_ERRORS" == "USB controller not detected" ]]; then
