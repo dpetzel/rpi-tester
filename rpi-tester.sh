@@ -319,10 +319,10 @@ run_cpu_stress() {
         fi
         local cmp=$(echo "$t > $max_temp" | bc 2>/dev/null || echo "0")
         [[ "$cmp" == "1" ]] && max_temp=$t
-        # Check for active throttling during stress (bits 0,2: undervolt, hard throttle — NOT bit 3 soft temp limit)
+        # Check for active throttling during stress (bits 0,2,3: undervolt, hard throttle, soft temp limit)
         local thr=$(vcgencmd get_throttled 2>/dev/null | grep -oP '0x[0-9a-fA-F]+' || echo "0x0")
         local tval=$((thr))
-        [[ $((tval & 0x5)) -ne 0 ]] && STRESS_THROTTLED=1
+        [[ $((tval & 0xD)) -ne 0 ]] && STRESS_THROTTLED=1
         sleep 2
     done
     wait "$pid" 2>/dev/null
@@ -871,12 +871,12 @@ print_summary() {
     elif [[ $THROTTLE_NOW -eq 1 ]]; then
         pwr_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
         pwr_detail="Thermal throttling active"
+    elif [[ $THROTTLE_HISTORY -eq 1 ]]; then
+        pwr_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
+        pwr_detail="Thermal throttling occurred during test"
     elif [[ $UNDERVOLT_HIST -eq 1 ]]; then
         pwr_status="$warn"
         pwr_detail="Undervoltage occurred previously"
-    elif [[ $THROTTLE_HISTORY -eq 1 ]]; then
-        pwr_status="$warn"
-        pwr_detail="Thermal throttling occurred previously"
     else
         pwr_detail="Clean — no issues detected"
     fi
