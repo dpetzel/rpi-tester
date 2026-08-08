@@ -630,11 +630,12 @@ run_gpio_pintest() {
     pintest_exit=${PIPESTATUS[0]:-$?}
 
     # Parse results: pintest prints each GPIO with "ok" or "FAIL"
-    local total_pins=0 passed_pins=0 failed_pins=0
+    # Only count lines that contain a result ("ok" or "FAIL") — ignore
+    # preamble lines that mention GPIO numbers without a test result.
+    local passed_pins=0 failed_pins=0
     local failures=""
     while IFS= read -r line; do
         if echo "$line" | grep -qiE 'GPIO[0-9]+'; then
-            ((total_pins++)) || true
             if echo "$line" | grep -qi "ok"; then
                 ((passed_pins++)) || true
             elif echo "$line" | grep -qi "FAIL"; then
@@ -644,6 +645,7 @@ run_gpio_pintest() {
             fi
         fi
     done <<< "$pintest_output"
+    local total_pins=$((passed_pins + failed_pins))
 
     if [[ $pintest_exit -eq 0 && $failed_pins -eq 0 ]]; then
         PINTEST_RESULT="PASS"
@@ -898,17 +900,15 @@ if [[ $QUICK -eq 0 ]]; then
     echo "--- Memory Test ---" >&2
     run_memory_test
     echo "--- memtester finished: result=${MEM_RESULT}, errors=${MEM_ERRORS} ---" >&2
-
-    echo "--- GPIO Pin Test ---" >&2
-    run_gpio_pintest
 else
     echo "--- Skipping CPU Stress (--quick) ---" >&2
     STRESS_RESULT="SKIP"; STRESS_MAX_TEMP="0"; STRESS_THROTTLED=0; STRESS_CLOCK="0"
     echo "--- Skipping Memory Test (--quick) ---" >&2
     MEM_RESULT="SKIP"; MEM_ERRORS=0; MEMTEST_MB=0
-    echo "--- Skipping GPIO Pin Test (--quick) ---" >&2
-    PINTEST_RESULT="SKIP"; PINTEST_DETAIL="Skipped (quick mode)"; PINTEST_FAILURES=""
 fi
+
+echo "--- GPIO Pin Test ---" >&2
+run_gpio_pintest
 
 echo "--- Writing Results ---" >&2
 build_json > "$OUTPUT"
