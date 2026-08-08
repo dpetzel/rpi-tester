@@ -606,6 +606,59 @@ check_gpio() {
     fi
 }
 
+# --- GPIO Pin Test (gpiozero pintest) ---
+
+run_gpio_pintest() {
+    # pintest requires nothing connected to GPIO pins.
+    # Only run on boards with a physical GPIO header (EXPECTED_GPIO > 0).
+    if [[ ${EXPECTED_GPIO:-0} -eq 0 ]]; then
+        PINTEST_RESULT="SKIP"; PINTEST_DETAIL="No GPIO header"; PINTEST_FAILURES=""; return
+    fi
+
+    # Ensure pintest command is available (part of python3-gpiozero >= 2.0)
+    if ! command -v pintest &>/dev/null; then
+        echo "Installing python3-gpiozero for GPIO pin test..." >&2
+        apt-get install -y -qq python3-gpiozero 2>/dev/null || true
+    fi
+    if ! command -v pintest &>/dev/null; then
+        PINTEST_RESULT="SKIP"; PINTEST_DETAIL="pintest not available (gpiozero >= 2.0 required)"; PINTEST_FAILURES=""; return
+    fi
+
+    echo "Running GPIO pin test (pintest)..." >&2
+    local pintest_output pintest_exit
+    pintest_output=$(pintest --yes 2>&1) || true
+    pintest_exit=${PIPESTATUS[0]:-$?}
+
+    # Parse results: pintest prints each GPIO with "ok" or "FAIL"
+    local total_pins=0 passed_pins=0 failed_pins=0
+    local failures=""
+    while IFS= read -r line; do
+        if echo "$line" | grep -qiE 'GPIO[0-9]+'; then
+            ((total_pins++)) || true
+            if echo "$line" | grep -qi "ok"; then
+                ((passed_pins++)) || true
+            elif echo "$line" | grep -qi "FAIL"; then
+                ((failed_pins++)) || true
+                local pin_name=$(echo "$line" | grep -oP 'GPIO[0-9]+' || echo "$line")
+                failures="${failures}${failures:+, }${pin_name}"
+            fi
+        fi
+    done <<< "$pintest_output"
+
+    if [[ $pintest_exit -eq 0 && $failed_pins -eq 0 ]]; then
+        PINTEST_RESULT="PASS"
+        PINTEST_DETAIL="${passed_pins}/${total_pins} pins OK"
+    elif [[ $failed_pins -gt 0 ]]; then
+        PINTEST_RESULT="FAIL"
+        PINTEST_DETAIL="${failed_pins}/${total_pins} pins FAILED"
+    else
+        # Non-zero exit but no parsed failures — could be a runtime error
+        PINTEST_RESULT="FAIL"
+        PINTEST_DETAIL="pintest exited with code ${pintest_exit}"
+    fi
+    PINTEST_FAILURES="$failures"
+}
+
 # --- Camera/DSI ---
 
 check_camera() {
@@ -773,7 +826,12 @@ build_json() {
   "gpio": {
     "chips": $GPIO_CHIPS,
     "lines": $GPIO_LINES,
-    "expected_gpio": $EXPECTED_GPIO
+    "expected_gpio": $EXPECTED_GPIO,
+    "pintest": {
+      "result": $(json_escape "$PINTEST_RESULT"),
+      "detail": $(json_escape "$PINTEST_DETAIL"),
+      "failures": $(json_escape "$PINTEST_FAILURES")
+    }
   },
   "camera": {
     "detected": $CAM_DETECTED,
@@ -840,11 +898,16 @@ if [[ $QUICK -eq 0 ]]; then
     echo "--- Memory Test ---" >&2
     run_memory_test
     echo "--- memtester finished: result=${MEM_RESULT}, errors=${MEM_ERRORS} ---" >&2
+
+    echo "--- GPIO Pin Test ---" >&2
+    run_gpio_pintest
 else
     echo "--- Skipping CPU Stress (--quick) ---" >&2
     STRESS_RESULT="SKIP"; STRESS_MAX_TEMP="0"; STRESS_THROTTLED=0; STRESS_CLOCK="0"
     echo "--- Skipping Memory Test (--quick) ---" >&2
     MEM_RESULT="SKIP"; MEM_ERRORS=0; MEMTEST_MB=0
+    echo "--- Skipping GPIO Pin Test (--quick) ---" >&2
+    PINTEST_RESULT="SKIP"; PINTEST_DETAIL="Skipped (quick mode)"; PINTEST_FAILURES=""
 fi
 
 echo "--- Writing Results ---" >&2
@@ -997,6 +1060,18 @@ print_summary() {
     echo -e "║  CPU Stress      │ $cpu_status │ Max ${STRESS_MAX_TEMP}°C / ${STRESS_DURATION}s"
     echo -e "║  Memory          │ $mem_status │ ${ram_gb}"
     echo -e "║  Boot Media      │ $stor_status │ ${BOOT_MEDIA} (${BOOT_DEVICE})"
+    # GPIO Pin Test
+    if [[ ${EXPECTED_GPIO:-0} -gt 0 ]]; then
+        local pintest_status="$pass"
+        local pintest_txt="${PINTEST_DETAIL}"
+        if [[ "$PINTEST_RESULT" == "FAIL" ]]; then
+            pintest_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
+            [[ -n "$PINTEST_FAILURES" ]] && pintest_txt="${PINTEST_DETAIL} (${PINTEST_FAILURES})"
+        elif [[ "$PINTEST_RESULT" == "SKIP" ]]; then
+            pintest_status="$skip"
+        fi
+        echo -e "║  GPIO Pins       │ $pintest_status │ ${pintest_txt}"
+    fi
     # USB - split into USB2 and USB3 lines
     if echo "$MODEL" | grep -qi "Pi 5"; then
         local usb3_status="$pass" usb2_status="$pass"
