@@ -469,12 +469,21 @@ check_network() {
         ETH_LINK=$(cat /sys/class/net/"$ETH_IFACE"/carrier 2>/dev/null || echo "0")
         ETH_SPEED=$(cat /sys/class/net/"$ETH_IFACE"/speed 2>/dev/null || echo "0")
         ETH_PING=""
+        ETH_IPV4=""
         if [[ "$ETH_LINK" == "1" ]]; then
+            # Check for IPv4 address — wait for DHCP if needed (up to 15s)
+            local attempts=0
+            while [[ $attempts -lt 5 ]]; do
+                ETH_IPV4=$(ip -4 addr show dev "$ETH_IFACE" 2>/dev/null | grep -oP 'inet \K[0-9.]+' | head -1 || echo "")
+                [[ -n "$ETH_IPV4" ]] && break
+                sleep 3
+                ((attempts++))
+            done
             local gw=$(ip route | grep default | grep "$ETH_IFACE" | awk '{print $3}' | head -1)
             [[ -n "$gw" ]] && ETH_PING=$(ping -c 3 -W 2 "$gw" 2>/dev/null | grep -oP 'rtt.*= \K[0-9.]+' || echo "timeout")
         fi
     else
-        ETH_LINK="absent"; ETH_SPEED="0"; ETH_PING=""
+        ETH_LINK="absent"; ETH_SPEED="0"; ETH_PING=""; ETH_IPV4=""
     fi
 
     # Wi-Fi
@@ -796,6 +805,7 @@ build_json() {
       "interface": $(json_escape "$ETH_IFACE"),
       "link": "$ETH_LINK",
       "speed_mbps": "$ETH_SPEED",
+      "ipv4": $(json_escape "$ETH_IPV4"),
       "ping_ms": "$ETH_PING",
       "expected_speed": $EXPECTED_ETH_SPEED
     },
@@ -1168,7 +1178,11 @@ print_summary() {
     fi
     if [[ $EXPECTED_ETH_SPEED -gt 0 ]]; then
         if [[ "$ETH_LINK" == "1" ]]; then
-            eth_txt="${ETH_SPEED}Mbps link"
+            if [[ -n "$ETH_IPV4" ]]; then
+                eth_txt="${ETH_SPEED}Mbps link"
+            else
+                eth_txt="FAIL — ${ETH_SPEED}Mbps link but no DHCP IPv4"
+            fi
         else
             eth_txt="No cable (${EXPECTED_ETH_SPEED}Mbps port)"
         fi
@@ -1178,8 +1192,12 @@ print_summary() {
     [[ "$bt_txt" == "FAIL"* ]] && bt_status="$fail"
     [[ "$bt_txt" == "Adapter found but NOT"* ]] && bt_status="$warn"
     [[ "$eth_txt" == No\ cable* ]] && eth_status="$warn"
+    [[ "$eth_txt" == "FAIL"* ]] && eth_status="$fail"
     # Only print lines for hardware the model actually has
     if [[ $EXPECTED_ETH_SPEED -gt 0 ]]; then
+        if [[ "$eth_status" == "$fail" ]]; then
+            overall="${RED}FAIL${NC}"; ((issues++)) || true
+        fi
         echo -e "║  Ethernet        │ $eth_status │ ${eth_txt}"
     fi
     if [[ $HAS_WIFI -eq 1 ]]; then
