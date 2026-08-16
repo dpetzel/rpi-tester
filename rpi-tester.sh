@@ -477,7 +477,7 @@ check_network() {
                 ETH_IPV4=$(ip -4 addr show dev "$ETH_IFACE" 2>/dev/null | grep -oP 'inet \K[0-9.]+' | head -1 || echo "")
                 [[ -n "$ETH_IPV4" ]] && break
                 sleep 3
-                ((attempts++))
+                ((attempts++)) || true
             done
             local gw=$(ip route | grep default | grep "$ETH_IFACE" | awk '{print $3}' | head -1)
             [[ -n "$gw" ]] && ETH_PING=$(ping -c 3 -W 2 "$gw" 2>/dev/null | grep -oP 'rtt.*= \K[0-9.]+' || echo "timeout")
