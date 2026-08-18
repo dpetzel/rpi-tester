@@ -1077,8 +1077,8 @@ print_summary() {
     echo -e "║  CPU Stress      │ $cpu_status │ Max ${STRESS_MAX_TEMP}°C / ${STRESS_DURATION}s"
     echo -e "║  Memory          │ $mem_status │ ${ram_gb}"
     echo -e "║  Boot Media      │ $stor_status │ ${BOOT_MEDIA} (${BOOT_DEVICE})"
-    # GPIO Pin Test
-    if [[ ${EXPECTED_GPIO:-0} -gt 0 ]]; then
+    # GPIO Pin Test — only show for boards where pintest actually runs
+    if [[ ${EXPECTED_GPIO:-0} -gt 0 && ${IS_COMPUTE_MODULE:-0} -eq 0 ]]; then
         local pintest_status="$pass"
         local pintest_txt="${PINTEST_DETAIL}"
         if [[ "$PINTEST_RESULT" == "FAIL" ]]; then
