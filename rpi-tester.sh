@@ -624,6 +624,13 @@ run_gpio_pintest() {
         PINTEST_RESULT="SKIP"; PINTEST_DETAIL="No GPIO header"; PINTEST_FAILURES=""; return
     fi
 
+    # Compute Modules expose GPIOs via board-to-board connectors, not a standard
+    # 40-pin header. pintest is designed for the physical header and would give
+    # meaningless results on a CM (carrier-board-dependent wiring).
+    if [[ ${IS_COMPUTE_MODULE:-0} -eq 1 ]]; then
+        PINTEST_RESULT="SKIP"; PINTEST_DETAIL="Compute Module — no 40-pin header"; PINTEST_FAILURES=""; return
+    fi
+
     # Ensure pintest command is available (part of python3-gpiozero >= 2.0)
     if ! command -v pintest &>/dev/null; then
         echo "Installing python3-gpiozero for GPIO pin test..." >&2
