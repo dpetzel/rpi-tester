@@ -155,6 +155,26 @@ get_sysinfo() {
     elif echo "$MODEL" | grep -qi "Pi 2"; then
         EXPECTED_USB=4; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=100; HAS_WIFI=0; HAS_BT=0
         EXPECTED_HDMI=1; HAS_AUDIO_JACK=1
+    elif echo "$MODEL" | grep -qi "Model B Plus"; then
+        # Pi 1 Model B+ (BCM2835): 4 USB ports via LAN9514 combo hub + 10/100 Ethernet,
+        # 3.5mm audio/composite jack, 1 HDMI, 40-pin GPIO header. No WiFi/BT.
+        EXPECTED_USB=4; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=100; HAS_WIFI=0; HAS_BT=0
+        EXPECTED_HDMI=1; HAS_AUDIO_JACK=1
+    elif echo "$MODEL" | grep -qi "Model A Plus"; then
+        # Pi 1 Model A+ (BCM2835): single USB port, no Ethernet, 3.5mm audio jack,
+        # 1 HDMI, 40-pin GPIO header. No WiFi/BT.
+        EXPECTED_USB=1; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=0; HAS_WIFI=0; HAS_BT=0
+        EXPECTED_HDMI=1; HAS_AUDIO_JACK=1
+    elif echo "$MODEL" | grep -qi "Model B"; then
+        # Pi 1 Model B (BCM2835, non-plus): 2 USB ports via LAN9512 combo hub + 10/100
+        # Ethernet, 3.5mm audio jack, 1 HDMI, 26-pin GPIO header. No WiFi/BT.
+        EXPECTED_USB=2; EXPECTED_GPIO=26; EXPECTED_ETH_SPEED=100; HAS_WIFI=0; HAS_BT=0
+        EXPECTED_HDMI=1; HAS_AUDIO_JACK=1
+    elif echo "$MODEL" | grep -qi "Model A"; then
+        # Pi 1 Model A (BCM2835, non-plus): single USB port, no Ethernet, 3.5mm audio
+        # jack, 1 HDMI, 26-pin GPIO header. No WiFi/BT.
+        EXPECTED_USB=1; EXPECTED_GPIO=26; EXPECTED_ETH_SPEED=0; HAS_WIFI=0; HAS_BT=0
+        EXPECTED_HDMI=1; HAS_AUDIO_JACK=1
     elif echo "$MODEL" | grep -qi "Zero 2"; then
         EXPECTED_USB=1; EXPECTED_GPIO=28; EXPECTED_ETH_SPEED=0; HAS_WIFI=1; HAS_BT=1
         EXPECTED_HDMI=1; HAS_AUDIO_JACK=0
@@ -421,23 +441,32 @@ check_usb() {
         if [[ "$usb_ctrl" -eq 0 ]]; then
             USB_PORT_ERRORS="USB controller not detected"
         fi
-    elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2"; then
-        # Pi 2B/3B/3B+: LAN9514 (Pi 2B & 3B) or LAN7515 (3B+) internal USB hub + Ethernet combo
-        # Topology: root_hub -> LAN9514 hub (0424:9514) -> Ethernet (0424:ec00) + 4 external USB ports
-        # Pi 3B+ uses LAN7515 (0424:7800) for both hub and Ethernet
-        LAN_HUB=$(echo "$USB_LIST" | grep -c "0424:9514\|0424:7800") || true
+    elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2\|Model B Plus\|Model B"; then
+        # Pi 2B/3B/3B+ and Pi 1 B/B+: internal USB hub + Ethernet combo chip
+        #   Pi 2B & 3B / Pi 1 B+ : LAN9514 (0424:9514) hub + Ethernet (0424:ec00)
+        #   Pi 3B+               : LAN7515 (0424:7800) for both hub and Ethernet
+        #   Pi 1 B (non-plus)    : LAN9512 (0424:9512) hub + Ethernet (0424:ec00)
+        # Topology: root_hub -> LAN hub -> Ethernet + external USB ports
+        LAN_HUB=$(echo "$USB_LIST" | grep -c "0424:9514\|0424:9512\|0424:7800") || true
         LAN_ETH=$(echo "$USB_LIST" | grep -c "0424:ec00\|0424:7800") || true
-        # Count occupied physical USB ports from tree topology
-        # 4 physical ports split across hub/4p (top) and hub/3p (LAN sub-hub)
-        # Top-level ports: direct children (8-space) of hub/4p, excluding the internal LAN sub-hub
+        # Count occupied physical USB ports from tree topology.
+        # LAN9514/LAN7515 (4-port boards: Pi 2B/3B/3B+, Pi 1 B+) split ports across
+        # hub/4p (top) and hub/3p (internal LAN sub-hub). LAN9512 (Pi 1 B) is a flat
+        # 2-port hub with no sub-hub, so count its top-level ports directly.
         local _p1 _p2
-        _p1=$(echo "$USB_TREE" | grep "^        |__ Port" | grep -cv "Driver=hub/3p") || true
-        # LAN sub-hub ports: 12-space children between hub/3p and next 8-space entry, excluding ethernet
-        _p2=$(echo "$USB_TREE" | sed -n "/Driver=hub\/3p/,/^        |__ Port/p" | grep "^            |__ Port" | grep -cv "lan78xx\|smsc95xx") || true
-        USB_PORTS_USED=$((_p1 + _p2))
-        USB_PORT_DETAIL="LAN hub: ${LAN_HUB}, Eth: ${LAN_ETH}, Ports used: ${USB_PORTS_USED}/4"
+        if echo "$USB_LIST" | grep -q "0424:9512" && ! echo "$USB_LIST" | grep -q "0424:9514\|0424:7800"; then
+            # LAN9512 (2-port): count external ports below the hub, excluding Ethernet
+            USB_PORTS_USED=$(echo "$USB_TREE" | grep "^        |__ Port" | grep -cv "smsc95xx\|lan78xx") || true
+        else
+            # Top-level ports: direct children (8-space) of hub/4p, excluding the internal LAN sub-hub
+            _p1=$(echo "$USB_TREE" | grep "^        |__ Port" | grep -cv "Driver=hub/3p") || true
+            # LAN sub-hub ports: 12-space children between hub/3p and next 8-space entry, excluding ethernet
+            _p2=$(echo "$USB_TREE" | sed -n "/Driver=hub\/3p/,/^        |__ Port/p" | grep "^            |__ Port" | grep -cv "lan78xx\|smsc95xx") || true
+            USB_PORTS_USED=$((_p1 + _p2))
+        fi
+        USB_PORT_DETAIL="LAN hub: ${LAN_HUB}, Eth: ${LAN_ETH}, Ports used: ${USB_PORTS_USED}/${EXPECTED_USB}"
         if [[ "$LAN_HUB" -eq 0 ]]; then
-            USB_PORT_ERRORS="LAN9514 hub missing — USB/Ethernet chip may be dead"
+            USB_PORT_ERRORS="LAN hub missing — USB/Ethernet chip may be dead"
         elif [[ "$LAN_ETH" -eq 0 ]]; then
             USB_PORT_ERRORS="Ethernet adapter not enumerated under LAN hub"
         fi
@@ -979,13 +1008,13 @@ print_summary() {
     stor_status="$pass"
 
     # USB
-    if [[ $USB_CONTROLLERS -lt 2 ]] && [[ $EXPECTED_USB -ge 4 ]] && ! echo "$MODEL" | grep -qi "Pi 3\|Pi 2"; then
+    if [[ $USB_CONTROLLERS -lt 2 ]] && [[ $EXPECTED_USB -ge 4 ]] && ! echo "$MODEL" | grep -qi "Pi 3\|Pi 2\|Model B"; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
     elif echo "$MODEL" | grep -qi "Compute Module 4\|Compute Module 5" && [[ "$USB_PORT_ERRORS" == "USB controller not detected" ]]; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
-    elif echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A" && [[ -n "$USB_PORT_ERRORS" ]]; then
+    elif echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A\|Model A" && [[ -n "$USB_PORT_ERRORS" ]]; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
-    elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2" && ! echo "$MODEL" | grep -qi "Zero" && ! echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A" && [[ "${LAN_HUB:-0}" -eq 0 ]]; then
+    elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2\|Model B" && ! echo "$MODEL" | grep -qi "Zero" && ! echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A" && [[ "${LAN_HUB:-0}" -eq 0 ]]; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
     elif echo "$MODEL" | grep -qi "Zero" && [[ -n "$USB_PORT_ERRORS" ]]; then
         usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
@@ -1121,7 +1150,7 @@ print_summary() {
             cm4_usb_status="$fail"; cm4_usb_txt="USB controller not detected"
         fi
         echo -e "║  USB Controller  │ $cm4_usb_status │ ${cm4_usb_txt}"
-    elif echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A" && ! echo "$MODEL" | grep -qi "Zero"; then
+    elif echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A\|Model A" && ! echo "$MODEL" | grep -qi "Zero"; then
         local usb_3a_status="$pass"
         local usb_3a_txt=""
         if [[ -n "$USB_PORT_ERRORS" ]]; then
@@ -1132,7 +1161,7 @@ print_summary() {
             usb_3a_txt="Port OK (no devices)"
         fi
         echo -e "║  USB             │ $usb_3a_status │ ${usb_3a_txt}"
-    elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2" && ! echo "$MODEL" | grep -qi "Zero"; then
+    elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2\|Model B" && ! echo "$MODEL" | grep -qi "Zero"; then
         local usb_hub_status="$pass"
         local usb_hub_txt=""
         if [[ "${LAN_HUB:-0}" -eq 0 ]]; then
@@ -1140,7 +1169,7 @@ print_summary() {
         elif [[ "${LAN_ETH:-0}" -eq 0 ]]; then
             usb_hub_status="$warn"; usb_hub_txt="Hub OK but Ethernet adapter missing"
         elif [[ "${USB_PORTS_USED:-0}" -gt 0 ]]; then
-            usb_hub_txt="${USB_PORTS_USED}/4 ports in use"
+            usb_hub_txt="${USB_PORTS_USED}/${EXPECTED_USB} ports in use"
         else
             usb_hub_txt="No external devices connected"
         fi
