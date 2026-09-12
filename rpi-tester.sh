@@ -968,8 +968,7 @@ print_summary() {
 
     # Determine per-category status
     local pwr_status="$pass" cpu_status="$pass" mem_status="$pass"
-    local stor_status="$pass" usb_status="$pass" net_status="$pass"
-    local disp_status="$pass" gpio_status="$pass"
+    local stor_status="$pass" usb_status="$pass"
     local overall="${GREEN}PASS${NC}" issues=0
 
     # Power
@@ -1007,39 +1006,16 @@ print_summary() {
     # Storage — if we booted, it works
     stor_status="$pass"
 
-    # USB
-    if [[ $USB_CONTROLLERS -lt 2 ]] && [[ $EXPECTED_USB -ge 4 ]] && ! echo "$MODEL" | grep -qi "Pi 3\|Pi 2\|Model B"; then
-        usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
-    elif echo "$MODEL" | grep -qi "Compute Module 4\|Compute Module 5" && [[ "$USB_PORT_ERRORS" == "USB controller not detected" ]]; then
-        usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
-    elif echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A\|Model A" && [[ -n "$USB_PORT_ERRORS" ]]; then
-        usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
-    elif echo "$MODEL" | grep -qi "Pi 3\|Pi 2\|Model B" && ! echo "$MODEL" | grep -qi "Zero" && ! echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A" && [[ "${LAN_HUB:-0}" -eq 0 ]]; then
-        usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
-    elif echo "$MODEL" | grep -qi "Zero" && [[ -n "$USB_PORT_ERRORS" ]]; then
-        usb_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
-    elif [[ "$USB_PORT_ERRORS" == "UNSUPPORTED_MODEL" ]]; then
+    # USB (fallback-row status only)
+    # NOTE: The per-model USB/Network/Display/GPIO rows are computed and counted
+    # at their actual print sites below. This block ONLY derives usb_status for
+    # the generic fallback USB row (the final "else" branch of the USB table
+    # section) so it does not double-count or misfire. Do NOT increment issues
+    # here — counting happens where the row is printed.
+    if [[ "$USB_PORT_ERRORS" == "UNSUPPORTED_MODEL" ]]; then
         usb_status="$warn"
     elif [[ -n "$USB_PORT_ERRORS" ]]; then
         usb_status="$warn"
-    fi
-
-    # Network
-    if [[ $HAS_WIFI -eq 1 && -z "$WIFI_IFACE" ]]; then
-        net_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
-    fi
-    if [[ $HAS_BT -eq 1 && "${BT_PRESENT:-0}" -eq 0 ]]; then
-        net_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
-    fi
-
-    # Display
-    if [[ $HDMI_CONNECTED -eq 0 ]]; then
-        disp_status="—"
-    fi
-
-    # GPIO
-    if [[ $GPIO_CHIPS -eq 0 ]]; then
-        gpio_status="$fail"; overall="${RED}FAIL${NC}"; ((issues++)) || true
     fi
 
     # EEPROM note
@@ -1148,6 +1124,7 @@ print_summary() {
         local cm4_usb_txt="Controller OK"
         if [[ "$USB_PORT_ERRORS" == "USB controller not detected" ]]; then
             cm4_usb_status="$fail"; cm4_usb_txt="USB controller not detected"
+            overall="${RED}FAIL${NC}"; ((issues++)) || true
         fi
         echo -e "║  USB Controller  │ $cm4_usb_status │ ${cm4_usb_txt}"
     elif echo "$MODEL" | grep -qi "Pi 3.*A+\|Pi 3 Model A\|Model A" && ! echo "$MODEL" | grep -qi "Zero"; then
@@ -1155,6 +1132,7 @@ print_summary() {
         local usb_3a_txt=""
         if [[ -n "$USB_PORT_ERRORS" ]]; then
             usb_3a_status="$fail"; usb_3a_txt="USB controller not detected"
+            overall="${RED}FAIL${NC}"; ((issues++)) || true
         elif [[ "${USB_PORTS_USED:-0}" -gt 0 ]]; then
             usb_3a_txt="${USB_PORTS_USED} device(s) attached"
         else
@@ -1166,6 +1144,7 @@ print_summary() {
         local usb_hub_txt=""
         if [[ "${LAN_HUB:-0}" -eq 0 ]]; then
             usb_hub_status="$fail"; usb_hub_txt="Internal USB hub NOT detected — chip may be dead"
+            overall="${RED}FAIL${NC}"; ((issues++)) || true
         elif [[ "${LAN_ETH:-0}" -eq 0 ]]; then
             usb_hub_status="$warn"; usb_hub_txt="Hub OK but Ethernet adapter missing"
         elif [[ "${USB_PORTS_USED:-0}" -gt 0 ]]; then
@@ -1179,6 +1158,7 @@ print_summary() {
         local usb_zero_txt=""
         if [[ -n "$USB_PORT_ERRORS" ]]; then
             usb_zero_status="$fail"; usb_zero_txt="USB controller not detected"
+            overall="${RED}FAIL${NC}"; ((issues++)) || true
         elif [[ "${USB_PORTS_USED:-0}" -gt 0 ]]; then
             usb_zero_txt="OTG: ${USB_PORTS_USED} device(s) attached"
         else
@@ -1237,9 +1217,15 @@ print_summary() {
         echo -e "║  Ethernet        │ $eth_status │ ${eth_txt}"
     fi
     if [[ $HAS_WIFI -eq 1 ]]; then
+        if [[ "$wifi_status" == "$fail" ]]; then
+            overall="${RED}FAIL${NC}"; ((issues++)) || true
+        fi
         echo -e "║  WiFi            │ $wifi_status │ ${wifi_txt}"
     fi
     if [[ $HAS_BT -eq 1 ]]; then
+        if [[ "$bt_status" == "$fail" ]]; then
+            overall="${RED}FAIL${NC}"; ((issues++)) || true
+        fi
         echo -e "║  Bluetooth       │ $bt_status │ ${bt_txt}"
     fi
     if [[ $IS_COMPUTE_MODULE -eq 0 ]] && [[ $HDMI_CONNECTED -gt 0 ]]; then
